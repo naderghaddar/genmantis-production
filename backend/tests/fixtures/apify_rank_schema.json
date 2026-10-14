@@ -1,0 +1,29 @@
+{
+  "source": "https://api.apify.com/v2/acts/compass~crawler-google-places/builds/default",
+  "build_id": "B7ybnATEIXjudDHFs",
+  "build_number": "0.14.770",
+  "fields": {
+    "rank": {
+      "type": "number",
+      "description": "Position in search results (1-based)"
+    },
+    "searchString": {
+      "type": "string",
+      "description": "Search query used to find this place",
+      "examples": [
+        "laundromat near orlando"
+      ]
+    },
+    "searchPageUrl": {
+      "type": "string",
+      "description": "URL of the search page where this place was found",
+      "examples": [
+        "https://www.google.com/maps/search/laundromat+near+orlando"
+      ]
+    },
+    "isAdvertisement": {
+      "type": "boolean",
+      "description": "Whether this place is a paid advertisement"
+    }
+  }
+}
