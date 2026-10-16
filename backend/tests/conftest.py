@@ -11,6 +11,10 @@ from app.services.apify_service import ApifyService
 def isolated_agent_storage(monkeypatch):
     # API lifespan tests must never read/write the user's local conversation database.
     monkeypatch.setenv("AGENT_DB_PATH", ":memory:")
+    monkeypatch.setenv("WORKSPACE_DB_PATH", ":memory:")
+    monkeypatch.setenv("SUPABASE_URL", "")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", "")
+    monkeypatch.setenv("ALLOW_LOCAL_WORKSPACE", "true")
 
 
 @pytest.fixture

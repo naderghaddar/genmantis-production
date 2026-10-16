@@ -23,6 +23,11 @@ class Settings:
     openai_key: str = field(default="", repr=False)
     openai_model: str = "gpt-5.4-mini"
     agent_db_path: str = str(Path(__file__).resolve().parents[1] / ".data" / "agent.sqlite3")
+    workspace_db_path: str = str(Path(__file__).resolve().parents[1] / ".data" / "workspace.sqlite3")
+    supabase_url: str = ""
+    supabase_publishable_key: str = field(default="", repr=False)
+    allow_local_workspace: bool = True
+    research_max_calls: int = 60
     max_verification_attempts: int = 4
     max_hunter_results: int = 10
     max_hunter_pages: int = 1
@@ -60,6 +65,11 @@ def get_settings() -> Settings:
         openai_key=os.getenv("OPENAI_API_KEY", "").strip(),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini",
         agent_db_path=os.getenv("AGENT_DB_PATH", str(Path(__file__).resolve().parents[1] / ".data" / "agent.sqlite3")),
+        workspace_db_path=os.getenv("WORKSPACE_DB_PATH", str(Path(__file__).resolve().parents[1] / ".data" / "workspace.sqlite3")),
+        supabase_url=os.getenv("SUPABASE_URL", "").strip().rstrip("/"),
+        supabase_publishable_key=os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip(),
+        allow_local_workspace=os.getenv("ALLOW_LOCAL_WORKSPACE", "true").lower() == "true",
+        research_max_calls=number("RESEARCH_MAX_CALLS", 60, 2, 100),
         max_verification_attempts=number("MAX_VERIFICATION_ATTEMPTS_PER_BUSINESS", 4, 1, 10),
         max_hunter_results=number("MAX_HUNTER_RESULTS_PER_DOMAIN", 10, 1, 100),
         max_hunter_pages=number("MAX_HUNTER_PAGES_PER_DOMAIN", 1, 1, 10),

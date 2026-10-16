@@ -1,0 +1,16 @@
+services:
+  genmantis:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - backend/.env
+    environment:
+      ALLOW_LOCAL_WORKSPACE: "false"
+      WORKSPACE_DB_PATH: /data/workspace.sqlite3
+      AGENT_DB_PATH: /data/agent.sqlite3
+    volumes:
+      - genmantis-data:/data
+    restart: unless-stopped
+volumes:
+  genmantis-data:

@@ -1,0 +1,12 @@
+.git
+.agents
+**/node_modules
+**/.venv
+**/.data
+**/.env
+**/.env.*
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/*.tsbuildinfo
+**/tests

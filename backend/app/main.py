@@ -5,6 +5,8 @@ from apify_client.errors import ApifyApiError
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path as FilePath
 from impit import TransportError
 
 from app.models.schemas import ScrapeRequest, ScrapeStatus
@@ -17,6 +19,10 @@ from app.api.agent_routes import router as agent_router, Owner
 from app.agents.lead_agent import LeadAgent
 from app.services.conversation_store import ConversationStore
 from app.services.openai_service import OpenAIService
+from app.api.workspace_routes import router as workspace_router
+from app.services.workspace_store import WorkspaceStore
+from app.services.campaign_service import CampaignService
+from app.agents.research_agent import ResearchAgent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,21 +32,50 @@ async def lifespan(app: FastAPI):
     manager.source_owner_callback = store.claim_source_run
     app.state.run_manager = manager
     app.state.lead_agent = LeadAgent(store, OpenAIService(settings), manager)
+    workspace_store = WorkspaceStore(settings.workspace_db_path, settings.supabase_url, settings.supabase_publishable_key)
+    campaigns = CampaignService(settings, workspace_store)
+    app.state.workspace_settings = settings
+    app.state.workspace_store = workspace_store
+    app.state.campaigns = campaigns
+    app.state.research_agent = ResearchAgent(settings, workspace_store, campaigns)
+    app.state.auth_cache = {}
     try:
         yield
     finally:
         # Shutdown cancels future provider work and waits for bounded in-flight calls.
         import asyncio
         await asyncio.to_thread(manager.close)
+        await asyncio.to_thread(campaigns.close)
+        workspace_store.close()
         store.close()
 
 
 app = FastAPI(title="GenMantis API", lifespan=lifespan)
 app.include_router(agent_router)
+app.include_router(workspace_router)
+
+
+@app.middleware("http")
+async def protect_legacy_routes(request: Request, call_next):
+    settings = getattr(request.app.state, "workspace_settings", None)
+    if settings and not settings.allow_local_workspace and request.url.path.startswith("/api/") and not request.url.path.startswith("/api/workspace"):
+        from app.api.workspace_routes import identity
+        from starlette.concurrency import run_in_threadpool
+        try:
+            owner = await run_in_threadpool(identity, request, Response())
+            request.state.authenticated_owner = owner.owner
+        except HTTPException as error:
+            return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+    return await call_next(request)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "application": "genmantis", "version": "4.0.0"}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Idempotency-Key"],
+    allow_methods=["GET", "POST", "PUT", "PATCH"], allow_headers=["Content-Type", "Idempotency-Key", "Authorization"],
     expose_headers=["Content-Disposition"],
     allow_credentials=True,
 )
@@ -114,3 +149,9 @@ def download_scrape(run_id: RunId, service: Service, owner: Owner, request: Requ
     items, filename = service.download(run_id)
     return Response(generate_csv(items), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# Docker and production builds serve the React app from the same origin as the API.
+frontend_dist = FilePath(__file__).resolve().parents[2] / "frontend_dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
