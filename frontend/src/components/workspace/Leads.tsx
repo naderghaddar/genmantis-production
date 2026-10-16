@@ -13,7 +13,7 @@ import {
   api,
   type CRMLead,
   type Workspace,
-  categoryName,
+  verificationLabel,
   dateLabel,
   exportLeads,
   sourceName,
@@ -58,7 +58,8 @@ export default function Leads({
       workspace.leads
         .filter(
           (lead) =>
-            (category === "all" || lead.category === category) &&
+            (category === "all" ||
+              lead.lead.verification?.result === category) &&
             (!industry || lead.industry === industry) &&
             (!stage || lead.stage === stage) &&
             (!campaign || lead.campaign_ids.includes(campaign)) &&
@@ -68,6 +69,8 @@ export default function Leads({
               lead.location,
               lead.industry,
               lead.lead.contact?.email,
+              lead.lead.contact?.first_name,
+              lead.lead.contact?.last_name,
               ...lead.tags,
             ]
               .join(" ")
@@ -132,7 +135,10 @@ export default function Leads({
             Lead database{" "}
             <span className="count-tag">{workspace.leads.length}</span>
           </h1>
-          <p>Every company, every contact, and the evidence behind them.</p>
+          <p>
+            People for your SEO outreach. Verified includes valid, catch-all and
+            unknown email results.
+          </p>
         </div>
         <button
           className="btn-secondary"
@@ -146,22 +152,22 @@ export default function Leads({
         </button>
       </div>
       <div className="lead-tabs">
-        {["all", "verified", "needs_review", "no_contact", "excluded"].map(
-          (value) => (
-            <button
-              className={category === value ? "active" : ""}
-              key={value}
-              onClick={() => chooseCategory(value)}
-            >
-              {value === "all" ? "All leads" : categoryName(value)}
-              <span>
-                {value === "all"
-                  ? workspace.leads.length
-                  : workspace.leads.filter((l) => l.category === value).length}
-              </span>
-            </button>
-          ),
-        )}
+        {["all", "valid", "catchall", "unknown"].map((value) => (
+          <button
+            className={category === value ? "active" : ""}
+            key={value}
+            onClick={() => chooseCategory(value)}
+          >
+            {value === "all" ? "All leads" : verificationLabel(value)}
+            <span>
+              {value === "all"
+                ? workspace.leads.length
+                : workspace.leads.filter(
+                    (l) => l.lead.verification?.result === value,
+                  ).length}
+            </span>
+          </button>
+        ))}
       </div>
       <div className="data-card">
         <div className="table-toolbar">
@@ -235,14 +241,14 @@ export default function Leads({
               ))}
             </select>
             <select
-              aria-label="Campaign filter"
+              aria-label="Search filter"
               value={campaign}
               onChange={(e) => {
                 setCampaign(e.target.value);
                 setPage(0);
               }}
             >
-              <option value="">All campaigns</option>
+              <option value="">All searches</option>
               {workspace.campaigns.map((value) => (
                 <option key={value.id} value={value.id}>
                   {value.plan.name}
@@ -265,7 +271,7 @@ export default function Leads({
           <div className="bulk-bar">
             <strong>{selected.length} selected</strong>
             <select
-              aria-label="Bulk pipeline stage"
+              aria-label="Bulk lead stage"
               value={bulkStage}
               onChange={(e) => setBulkStage(e.target.value as Stage)}
             >
@@ -323,7 +329,8 @@ export default function Leads({
                       />
                     </th>
                     <th>Company</th>
-                    <th>Contact</th>
+                    <th>Person</th>
+                    <th>Email</th>
                     <th>Verification</th>
                     <th>Fit</th>
                     <th>Stage</th>
@@ -381,8 +388,17 @@ export default function Leads({
                           </small>
                         </div>
                       </td>
+                      <td className="lead-email">{lead.lead.contact?.email}</td>
                       <td>
-                        <Badge value={lead.category} />
+                        <Badge
+                          value={
+                            lead.lead.verification?.result === "valid"
+                              ? "verified"
+                              : "needs_review"
+                          }
+                        >
+                          {verificationLabel(lead.lead.verification?.result)}
+                        </Badge>
                       </td>
                       <td>
                         <span
@@ -456,7 +472,7 @@ export default function Leads({
             text={
               workspace.leads.length
                 ? "Try another search or clear your filters."
-                : "Start with a research campaign. Discovered businesses and verified contacts will be organized here automatically."
+                : "Ask your GenMantis agent for a niche, cities and lead count. Named people with accepted email checks appear here automatically."
             }
             action={
               <button

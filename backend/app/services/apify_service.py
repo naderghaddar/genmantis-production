@@ -12,7 +12,7 @@ FIXED_SETTINGS = {
     "enableCompetitorAnalysis": False,
     "includeWebResults": False,
     "maxCompetitorsToAnalyze": 30,
-    "maxCrawledPlacesPerSearch": 30,
+    "maxCrawledPlacesPerSearch": 70,
     "maximumLeadsEnrichmentRecords": 0,
     "scrapeContacts": False,
     "scrapeDirectories": False,

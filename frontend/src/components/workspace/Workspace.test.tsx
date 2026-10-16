@@ -1,14 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Leads from "./Leads";
-import CampaignForm from "./CampaignForm";
+import SearchRun from "./SearchRun";
+import Advisor from "./Advisor";
 import LeadDetail from "./LeadDetail";
-import { BusinessSettings } from "./Settings";
+
 import App from "../../App";
 import {
   type Config,
   type CRMLead,
   type Workspace,
+  type Campaign,
   api,
 } from "../../services/workspaceApi";
 
@@ -26,14 +28,16 @@ const profile = {
   exclusions: "",
   buyer_roles: "",
 };
-const lead = (id: string, category: CRMLead["category"]): CRMLead => ({
+const lead = (id: string, result: string): CRMLead => ({
   id,
   company: id === "a" ? "Acme Clinic" : "Birch Studio",
   domain: id + ".com",
   industry: "Healthcare",
   location: "Austin",
   website: "https://" + id + ".com",
-  category,
+  category: ["valid", "catchall", "unknown"].includes(result)
+    ? "verified"
+    : "needs_review",
   stage: "new",
   tags: [],
   notes: "",
@@ -53,7 +57,7 @@ const lead = (id: string, category: CRMLead["category"]): CRMLead => ({
     excluded: false,
   },
   lead: {
-    verified: category === "verified",
+    verified: ["valid", "catchall", "unknown"].includes(result),
     contact: {
       first_name: "Pat",
       last_name: "Owner",
@@ -64,7 +68,7 @@ const lead = (id: string, category: CRMLead["category"]): CRMLead => ({
       confidence: 90,
     },
     verification: {
-      result: category === "verified" ? "valid" : "catchall",
+      result,
       flags: [],
     },
     business: { business_phone: null },
@@ -79,7 +83,7 @@ const lead = (id: string, category: CRMLead["category"]): CRMLead => ({
 const workspace: Workspace = {
   profile,
   campaigns: [],
-  leads: [lead("a", "verified"), lead("b", "needs_review")],
+  leads: [lead("a", "valid"), lead("b", "catchall")],
   threads: [],
   account: { email: null, storage: "local" },
 };
@@ -117,25 +121,98 @@ beforeEach(() => {
   };
   vi.mocked(api).mockReset();
 });
-describe("Lead workspace", () => {
-  it("loads the workspace and navigates the research, CRM and pipeline screens", async () => {
+const campaign: Campaign = {
+  id: "search1",
+  version: 1,
+  status: "shortfall",
+  created_at: "2026-10-16",
+  updated_at: "2026-10-16",
+  plan: {
+    name: "Texas dentists",
+    source: "google_maps",
+    niche: "dentists",
+    city: "Austin",
+    state: "Texas",
+    locations: [
+      { city: "Austin", state: "Texas" },
+      { city: "Round Rock", state: "Texas" },
+      { city: "Cedar Park", state: "Texas" },
+    ],
+    query: "",
+    websites: [],
+    max_leads: 100,
+    rationale: "SEO prospects",
+    qualification_criteria: [],
+    exclusions: [],
+    research_websites: false,
+    min_google_maps_rank: null,
+    max_google_maps_rank: null,
+  },
+  message:
+    "Found 30 of 100 requested leads across 3 searched locations. 70 more leads are needed.",
+  shortfall: 70,
+  progress: {
+    target: 100,
+    discovered: 210,
+    processed: 210,
+    verified: 30,
+    review: 0,
+    excluded: 0,
+    reused: 0,
+  },
+  warnings: [],
+  events: [],
+  usage: { requests: 0, input_tokens: 0, output_tokens: 0 },
+  recommendations: [
+    {
+      city: "Georgetown",
+      state: "Texas",
+      reason: "Nearby dental businesses suitable for local SEO.",
+      evidence: [
+        {
+          url: "https://example.com/cities",
+          title: "City evidence",
+          observation: "Nearby market",
+        },
+      ],
+    },
+  ],
+};
+
+describe("Focused lead workspace", () => {
+  it("opens the agent and exposes only advisor and lead database navigation", async () => {
     window.location.hash = "overview";
-    vi.mocked(api).mockImplementation(async (path) => path === "/config" ? config : workspace);
+    vi.mocked(api).mockImplementation(async (path) =>
+      path === "/config" ? config : workspace,
+    );
     render(<App />);
-    expect(await screen.findByRole("heading", { name: /Good (morning|afternoon|evening)/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Research advisor AI" }));
-    expect(screen.getByRole("textbox", { name: "Message research advisor" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("textbox", { name: "Message research advisor" }),
+    ).toBeInTheDocument();
+    for (const name of [
+      "Overview",
+      "Pipeline",
+      "Campaigns",
+      "Business profile",
+      "Sources & integrations",
+      "New campaign",
+    ]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Message research advisor" }),
+      { target: { value: "Fetch 50 leads" } },
+    );
     fireEvent.click(screen.getByRole("button", { name: "Lead database 2" }));
-    expect(screen.getByRole("heading", { name: "Lead database 2" })).toBeInTheDocument();
-    expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Pipeline" }));
-    expect(screen.getByRole("heading", { name: "Your pipeline" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Business profile" }));
-    expect(screen.getByLabelText("What do you sell?")).toBeInTheDocument();
-    expect(api).toHaveBeenCalledWith("/config");
-    expect(api).toHaveBeenCalledWith("");
+    expect(
+      screen.getByRole("heading", { name: "Lead database 2" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Research advisor" }));
+    expect(
+      screen.getByRole("textbox", { name: "Message research advisor" }),
+    ).toHaveValue("Fetch 50 leads");
   });
-  it("filters verification categories and company search without conflating fit", () => {
+  it("filters the exact accepted verification statuses and displays contact emails", () => {
     render(
       <Leads
         workspace={workspace}
@@ -144,8 +221,8 @@ describe("Lead workspace", () => {
         onResearch={vi.fn()}
       />,
     );
-    expect(screen.getByText("Acme Clinic")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Needs review 1" }));
+    expect(screen.getByText("a@company.com")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Catch-all 1" }));
     expect(screen.queryByText("Acme Clinic")).not.toBeInTheDocument();
     expect(screen.getByText("Birch Studio")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Search leads"), {
@@ -155,74 +232,109 @@ describe("Lead workspace", () => {
       screen.getByText("No leads match these filters"),
     ).toBeInTheDocument();
   });
-  it("prepares a draft without starting a paid campaign", async () => {
-    const save = vi.fn().mockResolvedValue(undefined);
-    render(<CampaignForm config={config} onClose={vi.fn()} onSave={save} />);
-    fireEvent.change(screen.getByLabelText("Target businesses"), {
-      target: { value: "Clinics" },
-    });
-    fireEvent.change(screen.getByLabelText("City"), {
-      target: { value: "Austin" },
-    });
-    fireEvent.change(screen.getByLabelText("State / region"), {
-      target: { value: "Texas" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save research plan" }));
-    await waitFor(() => expect(save).toHaveBeenCalledOnce());
-    expect(save.mock.calls[0][0]).toMatchObject({
-      source: "google_maps",
-      niche: "Clinics",
-      city: "Austin",
-      max_leads: 10,
-    });
-    expect(api).not.toHaveBeenCalled();
-  });
-  it("persists business context", async () => {
-    vi.mocked(api).mockResolvedValue({});
+  it("reports the real shortfall and lets the user compose additional cities without starting them", () => {
+    const suggest = vi.fn();
     render(
-      <BusinessSettings
-        profile={profile}
-        refresh={vi.fn().mockResolvedValue(undefined)}
+      <SearchRun
+        campaign={campaign}
+        refresh={vi.fn()}
+        viewLeads={vi.fn()}
+        suggest={suggest}
       />,
     );
-    fireEvent.change(screen.getByLabelText("What do you sell?"), {
-      target: { value: "Local SEO for clinics" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+    expect(screen.getByText(/Found 30 of 100/)).toBeInTheDocument();
+    expect(screen.getByText("Georgetown, Texas")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toHaveAttribute("value", "30");
+    fireEvent.click(screen.getByRole("button", { name: /Use these cities/ }));
+    expect(suggest).toHaveBeenCalledWith(
+      expect.stringContaining("Find 70 more leads"),
+    );
+    expect(suggest).toHaveBeenCalledWith(
+      expect.stringContaining("Georgetown, Texas"),
+    );
+    expect(api).not.toHaveBeenCalled();
+  });
+  it("can stop a running search inside the advisor", async () => {
+    vi.mocked(api).mockResolvedValue({ requested: true });
+    render(
+      <SearchRun
+        campaign={{ ...campaign, status: "enriching", recommendations: [] }}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        viewLeads={vi.fn()}
+        suggest={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Stop search" }));
     await waitFor(() =>
       expect(api).toHaveBeenCalledWith(
-        "/profile",
-        "PUT",
-        expect.objectContaining({ offer: "Local SEO for clinics" }),
+        "/campaigns/search1/cancel",
+        "POST",
+        undefined,
       ),
     );
     expect(
-      await screen.findByText(/Business profile saved/),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Stop requested" }),
+    ).toBeDisabled();
   });
-  it("blocks qualification for an unverified contact and saves notes separately", async () => {
+  it("sends a lead request directly through the conversation", async () => {
+    const thread = {
+      id: "thread1",
+      title: "Texas",
+      messages: [],
+      campaign_ids: [],
+      status: "idle",
+      usage: { requests: 0, input_tokens: 0, output_tokens: 0 },
+    };
+    vi.mocked(api).mockResolvedValue(thread);
+    render(
+      <Advisor
+        workspace={workspace}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        review={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Message research advisor"), {
+      target: { value: "Fetch 50 dentist leads in Austin, Texas" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith(
+        "/threads/thread1/messages",
+        "POST",
+        expect.objectContaining({
+          message: "Fetch 50 dentist leads in Austin, Texas",
+        }),
+      ),
+    );
+    expect(
+      screen.queryByRole("button", { name: /Confirm|Approve/ }),
+    ).not.toBeInTheDocument();
+  });
+  it("allows an unknown contact under the policy and saves CRM notes", async () => {
     vi.mocked(api).mockResolvedValue({});
     render(
       <LeadDetail
-        lead={lead("b", "needs_review")}
+        lead={lead("b", "unknown")}
         onClose={vi.fn()}
         onSaved={vi.fn().mockResolvedValue(undefined)}
       />,
     );
-    expect(screen.getByRole("option", { name: "Qualified" })).toBeDisabled();
+    expect(
+      screen.getByRole("option", { name: "Qualified" }),
+    ).not.toBeDisabled();
+    expect(
+      screen.getByText(/Catch-all and unknown do not confirm deliverability/),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Notes"), {
-      target: { value: "Check service fit" },
+      target: { value: "SEO opportunity" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
       expect(api).toHaveBeenCalledWith(
         "/leads/b",
         "PATCH",
-        expect.objectContaining({ notes: "Check service fit", stage: "new" }),
+        expect.objectContaining({ notes: "SEO opportunity" }),
       ),
     );
-    expect(
-      screen.getByText(/does not have a NeverBounce-valid contact/),
-    ).toBeInTheDocument();
   });
 });

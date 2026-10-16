@@ -59,7 +59,7 @@ def test_exact_input_and_start(setup):
     expected = {
         "searchStringsArray": ["Chiropractors"], "locationQuery": "Austin, Texas",
         "enableCompetitorAnalysis": False, "includeWebResults": False,
-        "maxCompetitorsToAnalyze": 30, "maxCrawledPlacesPerSearch": 30,
+        "maxCompetitorsToAnalyze": 30, "maxCrawledPlacesPerSearch": 70,
         "maximumLeadsEnrichmentRecords": 0, "scrapeContacts": False,
         "scrapeDirectories": False, "scrapeImageAuthors": False,
         "scrapeOrderOnline": False, "scrapePlaceDetailPage": False,

@@ -1,89 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ArrowRight,
-  ChevronDown,
-  CircleHelp,
-  Columns3,
-  Compass,
-  FolderKanban,
-  Globe2,
-  LayoutDashboard,
-  LogOut,
-  Menu,
-  Plus,
-  Settings2,
-  Sparkles,
-  Users,
-} from "lucide-react";
+import { LogOut, Menu, Sparkles, Users } from "lucide-react";
 import {
   active,
   api,
   auth,
   initializeAuth,
-  type Campaign,
   type Config,
-  type Plan,
   type Workspace,
 } from "./services/workspaceApi";
-import { Mark, Modal, Spinner } from "./components/workspace/Shared";
-import Overview from "./components/workspace/Overview";
+import { Mark, Spinner } from "./components/workspace/Shared";
 import Advisor from "./components/workspace/Advisor";
 import Leads from "./components/workspace/Leads";
-import Pipeline from "./components/workspace/Pipeline";
-import Campaigns, { CampaignDetail } from "./components/workspace/Campaigns";
-import CampaignForm from "./components/workspace/CampaignForm";
 import LeadDetail from "./components/workspace/LeadDetail";
-import {
-  AuthModal,
-  BusinessSettings,
-  Integrations,
-} from "./components/workspace/Settings";
+import { AuthModal } from "./components/workspace/AuthModal";
 
-type Page =
-  | "overview"
-  | "advisor"
-  | "leads"
-  | "pipeline"
-  | "campaigns"
-  | "profile"
-  | "integrations";
-const nav = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "advisor", label: "Research advisor", icon: Sparkles },
-  { id: "leads", label: "Lead database", icon: Users },
-  { id: "pipeline", label: "Pipeline", icon: Columns3 },
-  { id: "campaigns", label: "Campaigns", icon: FolderKanban },
-] as const;
-const pageNames = {
-  overview: "Overview",
-  advisor: "Research advisor",
-  leads: "Lead database",
-  pipeline: "Pipeline",
-  campaigns: "Campaigns",
-  profile: "Business profile",
-  integrations: "Sources & integrations",
-};
-
+type Page = "advisor" | "leads";
 export default function App() {
-  const [page, setPage] = useState<Page>(() => {
-    const hash = window.location.hash.slice(1);
-    return Object.keys(pageNames).includes(hash) ? (hash as Page) : "overview";
-  });
+  const [page, setPage] = useState<Page>(() =>
+    window.location.hash === "#leads" ? "leads" : "advisor",
+  );
   const [config, setConfig] = useState<Config | null>(null);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAuth, setShowAuth] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
-  const [editCampaign, setEditCampaign] = useState<Campaign | null>(null);
-  const [campaignId, setCampaignId] = useState<string | null>(null);
   const [leadId, setLeadId] = useState<string | null>(null);
   const [sidebar, setSidebar] = useState(false);
-  const [help, setHelp] = useState(false);
+  const [leadSearch, setLeadSearch] = useState("");
   const generation = useRef(0);
   const alive = useRef(true);
-  const [leadCampaign, setLeadCampaign] = useState("");
   const refresh = useCallback(async () => {
     const current = generation.current;
     const next = await api<Workspace>("");
@@ -115,8 +61,9 @@ export default function App() {
             if (event === "SIGNED_IN" || event === "SIGNED_OUT") {
               generation.current += 1;
               setWorkspace(null);
-              setCampaignId(null);
               setLeadId(null);
+              setPage("advisor");
+              setLeadSearch("");
               setAuthRequired(
                 event === "SIGNED_OUT" && !cfg.auth.local_enabled,
               );
@@ -157,40 +104,14 @@ export default function App() {
     setSidebar(false);
   }, [page]);
   useEffect(() => {
-    const change = () => {
-      const value = window.location.hash.slice(1);
-      if (Object.keys(pageNames).includes(value)) setPage(value as Page);
-    };
+    const change = () =>
+      setPage(window.location.hash === "#leads" ? "leads" : "advisor");
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
-  function review(campaign: Campaign) {
-    setCampaignId(campaign.id);
-  }
-  async function saveCampaign(plan: Plan, campaign?: Campaign | null) {
-    const saved = campaign
-      ? await api<Campaign>(
-          "/campaigns/" + campaign.id + "?version=" + campaign.version,
-          "PUT",
-          plan,
-        )
-      : await api<Campaign>("/campaigns", "POST", plan);
-    await refresh();
-    setShowCreate(false);
-    setEditCampaign(null);
-    setCampaignId(saved.id);
-    setPage("campaigns");
-  }
-  const selectedCampaign = workspace?.campaigns.find(
-    (c) => c.id === campaignId,
-  );
-  const selectedLead = workspace?.leads.find((l) => l.id === leadId);
-  const move = (next: Page) => {
-    if (next === "leads") setLeadCampaign("");
-    setPage(next);
-  };
+  const selectedLead = workspace?.leads.find((lead) => lead.id === leadId);
   return (
-    <div className="workspace-app">
+    <div className="workspace-app focused-workspace">
       {sidebar && (
         <button
           className="sidebar-backdrop"
@@ -200,84 +121,45 @@ export default function App() {
       )}
       <aside className={"sidebar " + (sidebar ? "open" : "")}>
         <a
-          href="#overview"
+          href="#advisor"
           className="brand-lockup"
-          onClick={() => move("overview")}
+          onClick={() => setPage("advisor")}
         >
           <Mark />
           <span>
             genmantis<span className="brand-period">.</span>
           </span>
         </a>
-        <div className="workspace-switch">
-          <span className="workspace-avatar">
-            {(workspace?.profile.company_name || "My workspace").slice(0, 1)}
-          </span>
-          <div>
-            <strong>{workspace?.profile.company_name || "My workspace"}</strong>
-            <small>
-              {workspace?.account.storage === "cloud"
-                ? "Cloud workspace"
-                : "Local workspace"}
-            </small>
-          </div>
-          <ChevronDown size={14} />
-        </div>
-        <button
-          className="sidebar-create"
-          onClick={() => setShowCreate(true)}
-          disabled={!workspace}
-        >
-          <Plus size={16} /> New campaign<span>↗</span>
-        </button>
-        <div className="nav-label">WORKSPACE</div>
+        <p className="focused-tagline">Your SEO growth partner</p>
         <nav aria-label="Main navigation">
-          {nav.map((item) => (
-            <button
-              key={item.id}
-              className={"nav-item " + (page === item.id ? "active" : "")}
-              onClick={() => move(item.id)}
-            >
-              <item.icon size={18} />
-              <span>{item.label}</span>
-              {item.id === "leads" && !!workspace?.leads.length && (
-                <b>{workspace.leads.length}</b>
-              )}
-              {item.id === "advisor" && <span className="nav-ai">AI</span>}
-            </button>
-          ))}
-        </nav>
-        <div className="nav-label second">PREFERENCES</div>
-        <nav aria-label="Workspace preferences">
           <button
-            className={"nav-item " + (page === "profile" ? "active" : "")}
-            onClick={() => move("profile")}
+            className={"nav-item " + (page === "advisor" ? "active" : "")}
+            onClick={() => setPage("advisor")}
           >
-            <Settings2 size={18} />
-            <span>Business profile</span>
+            <Sparkles size={18} />
+            <span>Research advisor</span>
           </button>
           <button
-            className={"nav-item " + (page === "integrations" ? "active" : "")}
-            onClick={() => move("integrations")}
+            className={"nav-item " + (page === "leads" ? "active" : "")}
+            onClick={() => {
+              setLeadSearch("");
+              setPage("leads");
+            }}
           >
-            <Globe2 size={18} />
-            <span>Sources & integrations</span>
+            <Users size={18} />
+            <span>Lead database</span>
+            {!!workspace?.leads.length && <b>{workspace.leads.length}</b>}
           </button>
         </nav>
         <div className="sidebar-bottom">
           <div className="advisor-tip">
-            <Compass size={21} />
-            <strong>Better leads start with a plan.</strong>
-            <p>Let your advisor help you find your next market.</p>
-            <button onClick={() => move("advisor")}>
-              Explore with AI
-              <ArrowRight size={13} />
-            </button>
+            <Sparkles size={21} />
+            <strong>Tell your agent who to find.</strong>
+            <p>
+              Choose your niche, cities and number of leads. GenMantis handles
+              the research.
+            </p>
           </div>
-          <button className="nav-item" onClick={() => setHelp(true)}>
-            <CircleHelp size={17} />
-            <span>How it works</span>
-          </button>
           <div className="account-row">
             <span className="account-avatar">
               {(workspace?.account.email || "You").slice(0, 1).toUpperCase()}
@@ -291,7 +173,7 @@ export default function App() {
                   ? "Signed in"
                   : config?.auth.url
                     ? "Sign in for cloud storage"
-                    : "Local mode"}
+                    : "Local workspace"}
               </small>
             </button>
             {workspace?.account.storage === "cloud" && (
@@ -316,23 +198,14 @@ export default function App() {
             >
               <Menu size={20} />
             </button>
-            <span className="topbar-workspace">Workspace</span>
-            <span className="breadcrumb-divider">/</span>
-            <strong>{pageNames[page]}</strong>
+            <strong>
+              {page === "advisor" ? "Research advisor" : "Lead database"}
+            </strong>
           </div>
-          <div>
-            <span className="system-status">
-              <i />
-              {running ? "Research in progress" : "Your growth, organized"}
-            </span>
-            <button
-              className="help-button"
-              aria-label="How GenMantis works"
-              onClick={() => setHelp(true)}
-            >
-              <CircleHelp size={17} />
-            </button>
-          </div>
+          <span className="system-status">
+            <i />
+            {running ? "Finding your next leads" : "Built for SEO outreach"}
+          </span>
         </header>
         {error && (
           <div className="error-banner global-error" role="alert">
@@ -340,7 +213,9 @@ export default function App() {
             <button
               className="text-link"
               onClick={() =>
-                void refresh().catch((err) => setError(err.message))
+                config
+                  ? void refresh().catch((err) => setError(err.message))
+                  : window.location.reload()
               }
             >
               Retry
@@ -350,69 +225,40 @@ export default function App() {
         {loading ? (
           <div className="app-loading">
             <Mark />
-            <Spinner label="Opening your workspace…" />
+            <Spinner label="Opening your agent…" />
           </div>
         ) : workspace && config ? (
           <>
-            {page === "overview" && (
-              <Overview
-                workspace={workspace}
-                research={() => move("advisor")}
-                create={() => setShowCreate(true)}
-                leads={() => move("leads")}
-                campaigns={() => move("campaigns")}
-                review={review}
-                openLead={(lead) => setLeadId(lead.id)}
-              />
-            )}
-            {page === "advisor" && (
+            <div hidden={page !== "advisor"}>
               <Advisor
                 key={workspace.account.email || "local"}
                 workspace={workspace}
                 refresh={refresh}
-                review={review}
-                researchAvailable={config.integrations.some((item) => item.name === "OpenAI" && item.connected)}
+                review={(campaign) => {
+                  setLeadSearch(campaign.id);
+                  setPage("leads");
+                }}
+                researchAvailable={config.integrations.some(
+                  (item) => item.name === "OpenAI" && item.connected,
+                )}
               />
-            )}
+            </div>
             {page === "leads" && (
               <Leads
-                key={leadCampaign}
-                initialCampaign={leadCampaign}
+                key={leadSearch}
+                initialCampaign={leadSearch}
                 workspace={workspace}
                 refresh={refresh}
                 openLead={(lead) => setLeadId(lead.id)}
-                onResearch={() => move("advisor")}
+                onResearch={() => setPage("advisor")}
               />
             )}
-            {page === "pipeline" && (
-              <Pipeline
-                workspace={workspace}
-                refresh={refresh}
-                openLead={(lead) => setLeadId(lead.id)}
-                onResearch={() => move("advisor")}
-              />
-            )}
-            {page === "campaigns" && (
-              <Campaigns
-                workspace={workspace}
-                create={() => setShowCreate(true)}
-                review={review}
-              />
-            )}
-            {page === "profile" && (
-              <BusinessSettings
-                key={workspace.account.email || "local"}
-                profile={workspace.profile}
-                refresh={refresh}
-              />
-            )}
-            {page === "integrations" && <Integrations config={config} />}
           </>
         ) : (
           !error && (
             <div className="app-loading">
               <Mark />
-              <h2>Your research workspace awaits</h2>
+              <h2>Your GenMantis agent awaits</h2>
               <button className="btn-primary" onClick={() => setShowAuth(true)}>
                 Sign in to continue
               </button>
@@ -420,33 +266,6 @@ export default function App() {
           )
         )}
       </div>
-      {(showCreate || editCampaign) && config && (
-        <CampaignForm
-          config={config}
-          campaign={editCampaign}
-          onClose={() => {
-            setShowCreate(false);
-            setEditCampaign(null);
-          }}
-          onSave={saveCampaign}
-        />
-      )}
-      {selectedCampaign && (
-        <CampaignDetail
-          campaign={selectedCampaign}
-          onClose={() => setCampaignId(null)}
-          refresh={refresh}
-          edit={() => {
-            setEditCampaign(selectedCampaign);
-            setCampaignId(null);
-          }}
-          showLeads={() => {
-            setLeadCampaign(selectedCampaign.id);
-            setCampaignId(null);
-            setPage("leads");
-          }}
-        />
-      )}
       {selectedLead && (
         <LeadDetail
           key={selectedLead.id}
@@ -457,47 +276,6 @@ export default function App() {
       )}
       {showAuth && (
         <AuthModal required={authRequired} onClose={() => setShowAuth(false)} />
-      )}
-      {help && (
-        <Modal
-          title="From research to relationships"
-          onClose={() => setHelp(false)}
-        >
-          <div className="help-content">
-            <p>
-              <strong>1. Add your business context.</strong> Tell your advisor
-              what you sell, who you serve, and which businesses to avoid.
-            </p>
-            <p>
-              <strong>2. Research with your advisor.</strong> Compare markets,
-              inspect company evidence, and prepare a focused campaign.
-            </p>
-            <p>
-              <strong>3. Review and start.</strong> Choose a discovery source
-              and a business limit. Starting a campaign uses your connected
-              provider accounts.
-            </p>
-            <p>
-              <strong>4. Work your leads.</strong> Hunter finds contacts,
-              NeverBounce verifies them, and the CRM organizes the results. Move
-              leads through your pipeline, add notes, and plan follow-ups.
-            </p>
-            <p className="muted">
-              Verified means NeverBounce returned valid. Research fit is a
-              separate assessment. No outreach is sent automatically.
-            </p>
-            <button
-              className="btn-primary"
-              onClick={() => {
-                setHelp(false);
-                move("advisor");
-              }}
-            >
-              Open research advisor
-              <ArrowRight size={15} />
-            </button>
-          </div>
-        </Modal>
       )}
     </div>
   );

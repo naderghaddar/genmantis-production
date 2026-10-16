@@ -82,8 +82,8 @@ def test_interrupted_campaign_does_not_restart(workspace):
     service.executor.submit.assert_not_called()
 
 
-@pytest.mark.parametrize("result,expected",[("valid","verified"),("catchall","needs_review"),("invalid","needs_review"),("verification_error","needs_review")])
-def test_all_discovery_sources_use_hunter_and_neverbounce(workspace, monkeypatch,result,expected):
+@pytest.mark.parametrize("result,accepted",[("valid",True),("catchall",True),("unknown",True),("invalid",False),("disposable",False),("verification_error",False)])
+def test_all_discovery_sources_use_hunter_and_neverbounce(workspace, monkeypatch,result,accepted):
     store, service, user = workspace
     service._discover = lambda *args: [{"title":"Clinic","website":"https://example.com","categoryName":"Clinic"}]
     hunter = MagicMock(); hunter.search.return_value = HunterSearch(contacts=[Contact(email="owner@example.com",job_title="Owner",first_name="Pat")])
@@ -92,15 +92,18 @@ def test_all_discovery_sources_use_hunter_and_neverbounce(workspace, monkeypatch
     monkeypatch.setattr("app.services.campaign_service.NeverBounceService",lambda *args: nb)
     for source in ["google_maps","web_research","company_websites"]:
         identity = store.identity("user_" + source)
-        campaign = service.create(identity,CampaignPlan(name="Test",source=source,niche="Clinics",city="Austin",state="Texas",query="Austin clinics",websites=["https://example.com"],research_websites=False))
+        campaign = service.create(identity,CampaignPlan(name="Test",source=source,niche="Clinics",city="Austin",state="Texas",query="Austin clinics",websites=["https://example.com"],research_websites=False,max_leads=1))
         from threading import Event
         service._run(identity,campaign,Event())
         records = store.list(identity,"lead")
-        assert len(records) == 1
-        assert records[0]["category"] == expected
-        assert records[0]["lead"]["verified"] == (result == "valid")
-        assert records[0]["lead"]["verification"]["result"] == result
-        assert store.get(identity,"campaign",campaign["id"])["status"] == "completed"
+        assert len(records) == int(accepted)
+        if accepted:
+            assert records[0]["category"] == "verified"
+            assert records[0]["lead"]["verified"] is True
+            assert records[0]["lead"]["verification"]["result"] == result
+        outcome = store.get(identity,"campaign",campaign["id"])
+        assert outcome["status"] == ("completed" if accepted else "shortfall")
+        assert outcome["progress"]["verified"] == int(accepted)
     assert hunter.search.call_count == 3
     assert nb.verify.call_count == 3
 
@@ -116,7 +119,8 @@ def test_excluded_business_does_not_spend_enrichment(workspace,monkeypatch):
     campaign=service.create(user,CampaignPlan(name="Test",source="company_websites",niche="Clinics",websites=["https://example.com"],exclusions=["National franchises"]))
     from threading import Event
     service._run(user,campaign,Event())
-    assert store.list(user,"lead")[0]["category"] == "excluded"
+    assert store.list(user,"lead") == []
+    assert store.get(user,"campaign",campaign["id"])["progress"]["excluded"] == 1
     hunter.search.assert_not_called(); nb.verify.assert_not_called()
 
 
@@ -139,8 +143,8 @@ def test_verified_export_checks_actual_provider_result_and_formula_escaping():
         client.get('/api/workspace')
         owner = 'local_' + __import__('hashlib').sha256(client.cookies.get('gm_session').encode()).hexdigest()
         store=app.state.workspace_store; user=store.identity(owner)
-        for key,result in [('good','valid'),('bad','catchall')]:
-            item={"id":key,"company":"=Example","industry":"Clinic","location":"Austin","domain":"example.com","category":"verified", "stage":"new", "campaign_ids":[],"source":"google_maps","assessment":{"fit":"unknown"},"lead":{"verified":True,"contact":{"email":"owner@example.com"},"verification":{"result":result}}}
+        for key,result in [('good','catchall'),('bad','invalid')]:
+            item={"id":key,"company":"=Example","industry":"Clinic","location":"Austin","domain":"example.com","category":"verified", "stage":"new", "campaign_ids":[],"source":"google_maps","assessment":{"fit":"unknown"},"lead":{"verified":True,"contact":{"email":"owner@example.com","first_name":"Pat","job_title":"Owner"},"verification":{"result":result}}}
             store.save(user,'lead',item)
         content=client.get('/api/workspace/leads/export').content.decode('utf-8-sig')
         assert content.count('owner@example.com') == 1
@@ -156,12 +160,15 @@ def test_research_rejects_nonpublic_urls(value):
     assert public_url(value) is None
 
 
-def test_research_tools_strict_and_no_execution_tool():
+def test_research_tools_strict_and_support_bounded_generation():
     for tool in RESEARCH_TOOLS:
         assert tool['strict'] is True
         assert tool['parameters']['additionalProperties'] is False
         assert set(tool['parameters']['required']) == set(tool['parameters']['properties'])
-    assert not any('start' in tool['name'] for tool in RESEARCH_TOOLS)
+    assert {'generate_leads','start_lead_search','propose_campaign'} <= {tool['name'] for tool in RESEARCH_TOOLS}
+    generate = next(tool for tool in RESEARCH_TOOLS if tool['name']=='generate_leads')
+    assert generate['parameters']['properties']['max_leads']['maximum']==1000
+    assert generate['parameters']['$defs']['CampaignLocation']['additionalProperties'] is False
 
 
 def test_advisor_proposes_without_executing_and_retries_idempotently(workspace,settings,monkeypatch):
@@ -256,3 +263,193 @@ def test_cloud_recovery_flush_is_owner_scoped_and_preserves_later_edits(monkeypa
     assert ('other','c') not in records
     assert store.db.execute('SELECT owner,id FROM workspace_outbox').fetchall()==[('other','c')]
     store.close()
+
+
+def mock_people(monkeypatch, search, verify):
+    hunter=MagicMock(); hunter.search.side_effect=search
+    nb=MagicMock(); nb.verify.side_effect=verify
+    monkeypatch.setattr("app.services.campaign_service.HunterService",lambda *args:hunter)
+    monkeypatch.setattr("app.services.campaign_service.NeverBounceService",lambda *args:nb)
+    return hunter,nb
+
+
+def person(email):
+    return Contact(email=email,first_name="Pat",last_name="Owner",job_title="Owner")
+
+
+def multi_plan(target=100):
+    return CampaignPlan(name="Texas dentists",source="google_maps",niche="dentists",max_leads=target,research_websites=False,
+        locations=[{"city":city,"state":"Texas"} for city in ["Austin","Round Rock","Cedar Park"]])
+
+
+def test_requested_100_three_cities_yield_30_and_recommend_more(workspace,monkeypatch):
+    from threading import Event
+    store,service,user=workspace
+    service.settings=replace(service.settings,openai_key="mock")
+    searched=[]
+    def discover(plan,*args):
+        searched.append(plan.city)
+        key=plan.city.replace(' ','').lower()
+        return [{"title":f"Clinic {key} {i}","website":f"https://{key}{i}.com"} for i in range(70)]
+    service._discover=discover
+    def search(domain):
+        import re
+        number=int(re.search(r'(\d+)\.com',domain)[1])
+        return HunterSearch(contacts=[person('pat@'+domain)] if number<10 else [])
+    hunter,nb=mock_people(monkeypatch,search,lambda email:Verification(result=["valid","catchall","unknown"][nb.verify.call_count%3]))
+    recommend=MagicMock(return_value=[{"city":"Georgetown","state":"Texas","reason":"Nearby market for dental SEO","evidence":[{"url":"https://example.com/cities","title":"City research","observation":"Nearby"}]}])
+    monkeypatch.setattr(ResearchService,'recommend_locations',recommend)
+    campaign=service.create(user,multi_plan())
+    service._run(user,campaign,Event())
+    result=store.get(user,'campaign',campaign['id'])
+    assert searched==['Austin','Round Rock','Cedar Park']
+    assert result['status']=='shortfall' and result['shortfall']==70
+    assert result['progress']['verified']==30 and result['progress']['discovered']==210
+    assert [item['leads'] for item in result['locations']]==[10,10,10]
+    assert len(store.list(user,'lead'))==30 and nb.verify.call_count==30
+    assert '30 of 100' in result['message']
+    assert result['recommendations'][0]['city']=='Georgetown'
+    recommend.assert_called_once()
+
+
+def test_target_counts_people_not_business_attempts_and_stops_before_next_city(workspace,monkeypatch):
+    from threading import Event
+    store,service,user=workspace
+    cities=[]
+    def discover(plan,*args):
+        cities.append(plan.city)
+        return [{"title":f"Clinic {i}","website":f"https://clinic{i}.com"} for i in range(70)]
+    service._discover=discover
+    def search(domain):
+        return HunterSearch(contacts=[person('pat@'+domain),person('sam@'+domain),Contact(email='info@'+domain,provider_type='generic')])
+    hunter,nb=mock_people(monkeypatch,search,lambda email:Verification(result='invalid' if email.startswith('pat@') else 'unknown'))
+    campaign=service.create(user,multi_plan(50))
+    service._run(user,campaign,Event())
+    result=store.get(user,'campaign',campaign['id'])
+    assert cities==['Austin']
+    assert result['status']=='completed' and result['progress']['verified']==50
+    assert hunter.search.call_count==50 and nb.verify.call_count==100
+    assert len(store.list(user,'lead'))==50
+    assert all(row['lead']['verification']['result']=='unknown' for row in store.list(user,'lead'))
+
+
+def test_multiple_people_per_business_and_email_deduplication(workspace,monkeypatch):
+    from threading import Event
+    store,service,user=workspace
+    service._discover=lambda *args:[{'title':'One','website':'https://one.com'},{'title':'Two','website':'https://two.com'}]
+    hunter,nb=mock_people(monkeypatch,lambda domain:HunterSearch(contacts=[person('Pat@shared.com'),person('pat@shared.com'),person('sam@'+domain)]),lambda email:Verification(result='catchall'))
+    campaign=service.create(user,plan(max_leads=3))
+    service._run(user,campaign,Event())
+    assert len(store.list(user,'lead'))==3 and nb.verify.call_count==3
+    assert store.get(user,'campaign',campaign['id'])['progress']['verified']==3
+    # A second request cannot recount saved contacts as new leads.
+    repeated=service.create(user,plan(max_leads=3))
+    service._run(user,repeated,Event())
+    assert store.get(user,'campaign',repeated['id'])['progress']['verified']==0
+    assert nb.verify.call_count==3
+
+
+def test_businesses_and_generic_inboxes_never_count_as_people(workspace,monkeypatch):
+    from threading import Event
+    store,service,user=workspace
+    service._discover=lambda *args:[{'title':'Clinic','website':'https://clinic.com'},{'title':'No website'}]
+    hunter,nb=mock_people(monkeypatch,lambda domain:HunterSearch(contacts=[Contact(email='info@clinic.com',provider_type='generic'),Contact(email='owner@clinic.com',job_title='Owner')]),lambda email:Verification(result='valid'))
+    campaign=service.create(user,plan(max_leads=1))
+    service._run(user,campaign,Event())
+    assert store.list(user,'lead')==[]
+    assert store.get(user,'campaign',campaign['id'])['progress']['verified']==0
+    nb.verify.assert_not_called()
+
+
+def test_cancellation_stops_before_more_people_or_cities(workspace,monkeypatch):
+    from threading import Event
+    store,service,user=workspace
+    cancel=Event()
+    discover=MagicMock(return_value=[{'title':'Clinic','website':'https://clinic.com'}])
+    service._discover=discover
+    def verify(email):
+        cancel.set()
+        return Verification(result='valid')
+    hunter,nb=mock_people(monkeypatch,lambda domain:HunterSearch(contacts=[person('a@clinic.com'),person('b@clinic.com')]),verify)
+    campaign=service.create(user,multi_plan())
+    service._run(user,campaign,cancel)
+    assert store.get(user,'campaign',campaign['id'])['status']=='cancelled'
+    assert nb.verify.call_count==1 and discover.call_count==1
+    assert len(store.list(user,'lead'))==1
+
+
+def test_generate_tool_starts_once_and_message_replay_does_not_spend(workspace,settings,monkeypatch):
+    store,service,user=workspace
+    service.executor.submit=MagicMock()
+    agent=ResearchAgent(replace(settings,openai_key='mock'),store,service)
+    client=MagicMock(); client.__enter__.return_value=client
+    call=NS(type='function_call',name='generate_leads',arguments=multi_plan(50).model_dump_json(),call_id='generate')
+    client.responses.create.side_effect=[NS(status='completed',output=[call],output_text='',usage=None),NS(status='completed',output=[],output_text='Your search has started.',usage=None)]
+    monkeypatch.setattr(ResearchService,'client',lambda self:client)
+    thread=agent.create(user)
+    body=AdvisorMessage(message='Fetch 50 dentists across these three Texas cities.',message_id='fetch')
+    result=agent.message(user,thread['id'],body)
+    agent.message(user,thread['id'],body)
+    assert len(result['campaign_ids'])==1
+    campaign=store.get(user,'campaign',result['campaign_ids'][0])
+    assert campaign['status']=='queued' and len(campaign['plan']['locations'])==3
+    assert campaign['thread_id']==thread['id']
+    service.executor.submit.assert_called_once()
+
+
+def test_location_validation_and_duplicate_city_normalization():
+    value=multi_plan(100)
+    assert value.city=='Austin' and len(value.locations)==3
+    duplicate=value.model_dump(); duplicate['locations'] += [{'city':'austin','state':'texas'}]
+    assert len(CampaignPlan.model_validate(duplicate).locations)==3
+    with pytest.raises(ValueError):
+        CampaignPlan(name='Test',source='google_maps',niche='dentists',locations=[{'city':' ','state':'Texas'}])
+
+
+def test_city_recommendations_require_citations_and_skip_searched_cities(settings,monkeypatch):
+    from app.models.workspace import LocationRecommendations
+    service=ResearchService(settings)
+    service.search=MagicMock(return_value={'summary':'Cities','sources':[{'url':'https://example.com/geography','title':'Geography'}]})
+    evidence=[{'title':'Geography','url':'https://example.com/geography','observation':'Nearby'}]
+    service.parse=MagicMock(return_value=LocationRecommendations(locations=[
+        {'city':'Austin','state':'Texas','reason':'Already searched','evidence':evidence},
+        {'city':'Georgetown','state':'Texas','reason':'Nearby','evidence':evidence},
+        {'city':'Uncited','state':'Texas','reason':'Unsupported','evidence':[{'title':'Fake','url':'https://fake.com','observation':'Unknown'}]}]))
+    assert [item['city'] for item in service.recommend_locations(multi_plan(),{})]==['Georgetown']
+
+
+def test_workspace_and_export_use_person_policy_including_older_records():
+    with TestClient(app) as client:
+        client.get('/api/workspace')
+        owner='local_'+__import__('hashlib').sha256(client.cookies.get('gm_session').encode()).hexdigest()
+        store=app.state.workspace_store; user=store.identity(owner)
+        for key,result,named in [('valid','valid',True),('catch','catchall',True),('unknown','unknown',True),
+                                 ('invalid','invalid',True),('error','verification_error',True),('generic','valid',False)]:
+            item={'id':key,'company':'Clinic','industry':'Dentist','location':'Austin','domain':'clinic.com',
+                'category':'needs_review','stage':'new','campaign_ids':['run'],'source':'google_maps','assessment':{'fit':'unknown'},
+                'lead':{'verified':False,'contact':{'email':key+'@clinic.com','first_name':'Pat' if named else None},'verification':{'result':result}}}
+            store.save(user,'lead',item)
+        rows=client.get('/api/workspace').json()['leads']
+        assert len(rows)==3 and all(item['lead']['verified'] for item in rows)
+        export=client.get('/api/workspace/leads/export').content.decode('utf-8-sig')
+        assert all(email in export for email in ['valid@clinic.com','catch@clinic.com','unknown@clinic.com'])
+        assert all(email not in export for email in ['invalid@clinic.com','error@clinic.com','generic@clinic.com'])
+        subset=client.get('/api/workspace/leads/export?category=unknown').content.decode('utf-8-sig')
+        assert 'unknown@clinic.com' in subset and 'valid@clinic.com' not in subset
+        assert client.patch('/api/workspace/leads/unknown',json={'stage':'qualified'}).status_code==200
+
+
+def test_editing_target_and_starting_older_draft_updates_progress(workspace):
+    store,service,user=workspace
+    service.executor.submit=MagicMock()
+    campaign=service.create(user,plan(max_leads=10))
+    for key in ['locations','recommendations','lead_ids','policy_version']:
+        campaign.pop(key)
+    for key in ['target','rejected','no_contact','verification_errors']:
+        campaign['progress'].pop(key)
+    store.save(user,'campaign',campaign)
+    edited=service.update_plan(user,campaign['id'],multi_plan(100),1)
+    assert edited['progress']['target']==100
+    started=service.start(user,campaign['id'],2)
+    assert started['locations']==[] and started['progress']['verification_errors']==0
+    assert started['policy_version']=='person-v2'

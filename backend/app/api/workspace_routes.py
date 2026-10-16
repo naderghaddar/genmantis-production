@@ -11,6 +11,7 @@ from app.api.agent_routes import browser_owner
 from app.agents.research_tools import source_catalog
 from app.models.workspace import AdvisorMessage, BusinessProfile, BulkLeadPatch, CampaignAction, CampaignPlan, LeadPatch, now
 from app.services.csv_service import safe_cell
+from app.services.lead_policy import verified_contact, normalize_record, visible_leads
 from app.services.workspace_store import WorkspaceIdentity
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace"])
@@ -65,7 +66,7 @@ def workspace(request: Request, user: Identity):
     store = request.app.state.workspace_store
     store.flush_recovery(user)
     campaigns = [request.app.state.campaigns.recover(user, item) for item in store.list(user, "campaign")]
-    leads = store.list(user, "lead")
+    leads = visible_leads(store.list(user, "lead"))
     threads = store.list(user, "thread")
     try:
         profile = store.get(user, "profile", "business")["profile"]
@@ -103,17 +104,12 @@ def cancel_campaign(campaign_id: str, request: Request, user: Identity):
     return request.app.state.campaigns.cancel(user, campaign_id)
 
 
-def verified_contact(record):
-    lead = record.get("lead") or {}
-    return record.get("category") == "verified" and lead.get("verified") is True and (lead.get("verification") or {}).get("result") == "valid"
-
-
 def patch_lead(store, user, lead_id, body):
     with store.operation_lock(user.owner):
-        lead = store.get(user, "lead", lead_id)
+        lead = normalize_record(store.get(user, "lead", lead_id))
         changes = body.model_dump(exclude_none=True)
         if changes.get("stage") == "qualified" and not verified_contact(lead):
-            raise HTTPException(409, "Only a NeverBounce-verified contact can move to Qualified.")
+            raise HTTPException(409, "Only a named contact with a NeverBounce valid, catchall or unknown result can move to Qualified.")
         changed = [key for key, value in changes.items() if lead.get(key) != value]
         lead.update(changes)
         if changed:
@@ -140,8 +136,8 @@ def update_lead(lead_id: str, body: LeadPatch, request: Request, user: Identity)
 
 @router.get("/leads/export")
 def export_leads(request: Request, user: Identity, category: str = "verified", campaign_id: str = ""):
-    records = request.app.state.workspace_store.list(user, "lead")
-    records = [item for item in records if (category == "all" or item["category"] == category)
+    records = visible_leads(request.app.state.workspace_store.list(user, "lead"))
+    records = [item for item in records if (category in {"all", "verified"} or (item["lead"].get("verification") or {}).get("result") == category)
         and (not campaign_id or campaign_id in item["campaign_ids"])]
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -151,11 +147,11 @@ def export_leads(request: Request, user: Identity, category: str = "verified", c
         lead = item.get("lead", {})
         contact, verification = lead.get("contact") or {}, lead.get("verification") or {}
         # The verified-only export checks provider evidence as well as the display category.
-        if category == "verified" and not (lead.get("verified") and verification.get("result") == "valid"):
+        if not verified_contact(item):
             continue
         writer.writerow([safe_cell(value) for value in [item["company"], item.get("domain"), item["industry"], item["location"],
             contact.get("first_name"), contact.get("last_name"), contact.get("job_title"), contact.get("email"), verification.get("result"),
-            verification.get("result") == "valid", item["stage"], item["assessment"]["fit"], item["source"], item.get("notes"), item.get("next_action"), item.get("follow_up")]])
+            verified_contact(item), item["stage"], item["assessment"]["fit"], item["source"], item.get("notes"), item.get("next_action"), item.get("follow_up")]])
     return Response(output.getvalue().encode("utf-8-sig"), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="genmantis_leads.csv"'})
 
 

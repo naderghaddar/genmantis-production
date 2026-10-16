@@ -85,7 +85,7 @@ def test_maximum_enrichment_count_does_not_change_fixed_actor_settings(settings,
     sdk.dataset.return_value.iterate_items.return_value = iter([
         {"title": f"Clinic {i}", "website": f"https://clinic{i}.com", **context(25)} for i in range(5)])
     request = ScrapeRequest(niche="x", city="Austin", state="Texas", max_leads=2, min_google_maps_rank=21)
-    assert build_actor_input(request)["maxCrawledPlacesPerSearch"] == 30
+    assert build_actor_input(request)["maxCrawledPlacesPerSearch"] == 70
     hunter, nb = MagicMock(), MagicMock()
     hunter.search.return_value = HunterSearch()
     updates = []

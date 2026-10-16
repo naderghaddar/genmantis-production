@@ -11,7 +11,7 @@ import {
   type CRMLead,
   type Stage,
   api,
-  categoryName,
+  verificationLabel,
   dateLabel,
   sourceName,
   stages,
@@ -123,14 +123,14 @@ export default function LeadDetail({
               </h3>
               <div className="verification-result">
                 <Badge value={lead.category}>
-                  {categoryName(lead.category)}
+                  {verificationLabel(lead.lead.verification?.result)}
                 </Badge>
                 <span>{lead.lead.verification?.result || "Not checked"}</span>
               </div>
               <p className="muted">
                 {lead.lead.verified
-                  ? "NeverBounce returned valid for this selected email."
-                  : "This record does not have a NeverBounce-valid contact. It is excluded from verified-only exports."}
+                  ? "Accepted under your lead policy: NeverBounce returned valid, catch-all or unknown. Catch-all and unknown do not confirm deliverability."
+                  : "This contact does not meet the current lead policy and is excluded from lead exports."}
               </p>
               <small>
                 Last processed {dateLabel(lead.lead.enrichment_timestamp)}
@@ -193,7 +193,7 @@ export default function LeadDetail({
             <section className="detail-section">
               <h3>Relationship</h3>
               <label>
-                Pipeline stage
+                Lead stage
                 <select
                   value={stage}
                   onChange={(e) => {

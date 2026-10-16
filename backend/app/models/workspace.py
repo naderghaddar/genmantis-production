@@ -28,15 +28,30 @@ class BusinessProfile(Strict):
     buyer_roles: str = Field(default="", max_length=500)
 
 
+class CampaignLocation(Strict):
+    city: str = Field(min_length=1, max_length=200)
+    state: str = Field(min_length=1, max_length=200, description="State, province, region or country needed to identify this city.")
+
+    @model_validator(mode="after")
+    def nonempty(self):
+        self.city, self.state = self.city.strip(), self.state.strip()
+        if not self.city or not self.state:
+            raise ValueError("Each location needs a city and state, region or country.")
+        return self
+
+
 class CampaignPlan(Strict):
     name: str = Field(min_length=1, max_length=120)
     source: Literal["google_maps", "web_research", "company_websites"]
     niche: str = Field(min_length=1, max_length=200)
     city: str = Field(default="", max_length=200)
     state: str = Field(default="", max_length=200)
+    locations: list[CampaignLocation] = Field(default_factory=list, max_length=30,
+        description="All user-approved cities in search order. Process each until the verified-person target is met. Never add unapproved cities.")
     query: str = Field(default="", max_length=1000)
-    websites: list[str] = Field(default_factory=list, max_length=30)
-    max_leads: int = Field(default=10, ge=1, le=30, strict=True)
+    websites: list[str] = Field(default_factory=list, max_length=70)
+    max_leads: int = Field(default=50, ge=1, le=1000, strict=True,
+        description="Requested number of NEW unique people with Hunter emails checked by NeverBounce as valid, catchall or unknown. This is NOT a business/scrape limit. Google Maps scrapes 70 businesses per location.")
     rationale: str = Field(default="", max_length=3000)
     qualification_criteria: list[str] = Field(default_factory=list, max_length=6,
         description="Additional company-fit requirements to assess from website evidence. Do not repeat niche, location or lead-count fields. Must be [] when research_websites is false.")
@@ -49,8 +64,13 @@ class CampaignPlan(Strict):
 
     @model_validator(mode="after")
     def valid_source(self):
+        if self.locations:
+            self.locations = list({(item.city.casefold(), item.state.casefold()): item for item in self.locations}.values())
+            self.city, self.state = self.locations[0].city, self.locations[0].state
         if self.source == "google_maps" and (not self.city.strip() or not self.state.strip()):
             raise ValueError("Google Maps needs a city and state or region.")
+        if not self.locations and self.city.strip() and self.state.strip():
+            self.locations = [CampaignLocation(city=self.city, state=self.state)]
         if self.source == "web_research" and not self.query.strip():
             raise ValueError("Web research needs a search query.")
         if self.source == "company_websites" and not self.websites:
@@ -93,6 +113,17 @@ class DiscoveredCompany(Strict):
 class DiscoveryBatch(Strict):
     companies: list[DiscoveredCompany]
     limitations: list[str]
+
+
+class LocationRecommendation(Strict):
+    city: str
+    state: str
+    reason: str
+    evidence: list[Evidence]
+
+
+class LocationRecommendations(Strict):
+    locations: list[LocationRecommendation]
 
 
 class LeadPatch(Strict):

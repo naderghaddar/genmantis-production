@@ -1,60 +1,41 @@
-# GenMantis research workspace
+# GenMantis SEO research architecture
 
-## Application flow
+## Product surface
 
-The React application contains Overview, Research advisor, Lead database, Pipeline, Campaigns, Business profile, and Sources & integrations. Hash navigation preserves deep links without a separate router service. Supabase Auth provides email/password registration and login; email confirmation follows the project's configuration. The backend verifies bearer tokens against Supabase Auth before trusting account identity. A short cache avoids repeated validation on polling.
+The React shell exposes exactly Research Advisor and Lead Database, defaulting to the advisor. Search runs are inline conversation cards with person-target progress, location results, cancellation, shortfalls and suggested cities. Removed pages: Overview, Campaigns, Pipeline, Business Profile, and Integrations. Authentication remains an account modal. Existing profile data is retained as context; users provide targeting details through conversation.
 
-For signed-in accounts, `WorkspaceStore` uses the Supabase REST API with that user's token. RLS independently restricts every record to `auth.uid()`. No service-role key is exposed or required. Local development can use a browser-owned SQLite workspace. Local records are separate from cloud accounts and are not automatically imported at login.
+## Advisor and execution
 
-The only Supabase project configured for this implementation is `cpuhytycdbthpqvevjmc` (`gemantis-production`, the blank production project). Migration: `supabase/migrations/202610160001_workspace.sql`. Other connected projects are outside this application's scope.
+`ResearchAgent` uses the Responses API with strict tool schemas. `source_capabilities`, `research_market`, `research_company`, `search_crm`, and `review_campaigns` provide context. `generate_leads` creates and starts a background search for an explicit request to fetch leads. `propose_campaign` creates a planning-only draft; `start_lead_search` starts an existing draft when requested. One create/start is allowed per message. Retried message IDs do not execute another run. Search history and current persisted outcomes are supplied on follow-up turns.
 
-## Research agent
+`CampaignPlan.max_leads` now means the requested number of new accepted people (1–1,000), not the number of businesses to enrich. `locations` is an ordered list of up to 30 city/region pairs. Old single-city drafts normalize into one location. A versioned durable reservation precedes worker submission and provider work. The five-tool conversational budget does not truncate the background worker.
 
-`ResearchAgent` uses a bounded Responses API tool loop. The business profile and recent conversation provide context. Six tools are available:
+The worker visits approved locations in order. Each Maps request uses `maxCrawledPlacesPerSearch=70`, one category search, and one location. It processes up to 70 results, deduplicates company domains across the run, applies requested ranking/company-fit filters, then calls Hunter for each eligible company. It stops when the person target is met, before spending on another city or contact. It never expands geography automatically.
 
-- `source_capabilities`: discovery coverage, fields, configuration, and limits.
-- `research_market`: live web search with source citations.
-- `research_company`: research restricted to a supplied public company's domain.
-- `search_crm`: inspect relevant company records, assessments, and user notes.
-- `review_campaigns`: inspect real campaign outcomes before recommending revisions.
-- `propose_campaign`: validate and persist a draft; never executes the campaign.
+## Person and email policy
 
-Each message allows five tool executions and a final response turn. Parallel tool calls are disabled. Threads retain tool activity, citations, associated drafts, and token usage. A repeated message ID returns the saved result. An interrupted model turn produces an explicit response and preserves prepared drafts. Validation failures return field-specific errors to the model for correction, without including raw user input. Users can continue the conversation to revise the strategy. Model outputs are not treated as permission to execute paid provider work.
+The workspace uses `lead_policy.py`: an identifiable named contact with a Hunter email and an actual NeverBounce result in `valid`, `catchall`, `unknown`. Generic inboxes, unnamed contacts, invalid/disposable addresses, missing outcomes, and `verification_error` do not count. NeverBounce's explicit `unknown` is distinct from a failed/unavailable check.
 
-Tools do not expose environment variables, arbitrary code execution, filesystem access, or outreach sending. Website content and CRM notes are untrusted data. Company research uses OpenAI's hosted web search rather than backend fetching arbitrary URLs. Citation and company-domain checks discard unsupported discoveries. The advisor does not have direct access to Supabase administrative tools.
+Hunter candidate ranking prioritizes relevant SEO buyers. The worker checks all suitable people returned within configured Hunter result/page limits, not just one person per company. Each accepted person is stored separately, keyed by a case-folded email hash. Duplicate emails across companies/cities and already-saved accepted people do not increase the target count. A request asks for new people.
 
-## Discovery and qualification
+Only accepted people enter the new lead database. Failed checks, excluded businesses and missing contacts contribute to run counters rather than lead rows. Previously stored records are preserved; reads and exports apply the current person/status policy and deduplicate emails. Provider evidence remains unchanged. CSV exports include exact email statuses and escape formula-leading cells. The legacy standalone enrichment APIs retain their old contracts; the new advisor/workspace is the active product path.
 
-Three executable sources:
+## Shortfalls and recommendations
 
-1. Google Maps: the existing Apify actor with its fixed 30-place ceiling and observed ranking checks.
-2. Web discovery: live OpenAI web search, followed by structured company extraction. A candidate's official website must have appeared in search sources. This is grounded discovery, not an arbitrary scraper generator.
-3. Company websites: a supplied list of at most 30 websites, followed by optional company research and contact enrichment.
+Exhausting the approved locations below the target produces `shortfall`, with `shortfall = target - verified`, a concrete result message and per-location counts. A separate two-request research budget searches for comparable nearby cities and structures recommendations. Evidence URLs must appear in the actual search sources; already-searched and duplicate city/region pairs are discarded. If recommendation research fails, the count remains accurate and the limitation is shown.
 
-Website research records a summary, fit assessment, reasons, unknowns, and cited evidence. A company is excluded only when the assessment establishes poor fit or an explicit exclusion; absence of evidence stays unknown. When research fails, the CRM marks fit unknown and retains the limitation. Qualification and email validity are separate.
+Suggestions are displayed in the advisor alongside a button that composes a request for the remaining count and suggested locations. Clicking that button does not itself scrape. The user can edit and send the request. Provider/storage interruption is `failed`, cancellation is `cancelled`, and a process restart is `interrupted`; these do not falsely claim every city was exhausted. Background outcomes are visible via workspace polling and available to subsequent advisor turns.
 
-The current research loop improves strategy across conversation turns; it does not silently launch additional campaigns or expand geography/budgets. Source cost estimates are expressed as bounded work, not invented dollar prices. A campaign uses at most `RESEARCH_MAX_CALLS` model requests; defaults to 60. A researched company normally needs two requests, so the final companies in a maximal campaign may remain unassessed when the budget is exhausted.
+## Storage and isolation
 
-## Invariant contact pipeline
+Supabase project: `cpuhytycdbthpqvevjmc`, the production project originally supplied as blank. No other Supabase project is used. Existing table `gm_workspace_records` supports profile/campaign/lead/thread JSON records with owner-based RLS. This change requires no schema migration.
 
-All discovery paths converge on the existing `HunterService`, `VerificationCache`, and `enrich_lead` candidate selection. No model-created email is accepted. Every selected Hunter contact receives a NeverBounce outcome. Only `valid` sets `verified=true`. Catchall, unknown, invalid, disposable and verification errors remain unverified. Companies without Hunter contacts remain no-contact records. Excluded companies do not consume enrichment credits.
+The API validates Supabase tokens; storage forwards the user's JWT to enforce RLS. Local development has a separate browser-owned SQLite workspace. Cloud write failures preserve results in a local recovery outbox for later synchronization. Retain the recovery data volume.
 
-The CRM categories are Verified, Needs review, No contact, and Excluded. Sales stages are independent: New, Qualified, Contacted, Meeting booked, Won, Lost and Archived. The API restricts edits to stage, tags, notes, next action and follow-up; users cannot override provider outcomes through these routes. Verified-only export additionally checks the stored NeverBounce result, and CSV cells are escaped against formula injection. All-category export retains outcomes explicitly.
+Run one backend process. Campaign locks/capacity are in-process. Persisted runs do not automatically resume paid provider operations after restart. Cancellation cannot reverse already billed calls or forcibly stop a remote Apify job. Database leases and provider-aware durable queue resumption would be needed for multiple replicas.
 
-Companies are deduplicated by domain/name within discovery and by domain across a workspace. Existing CRM records are linked to a later campaign without buying another enrichment. Their original verification timestamp remains unchanged; reuse does not imply a fresh verification. Contact freshness/reverification is a future extension.
+## Validation
 
-## Execution and persistence
+Tests cover the user's 100-target/three-city/30-result case, a 50-person stopping case, multiple named people at one business, duplicate emails and saved-contact reuse, generic/unnamed exclusions, all NeverBounce statuses, cancellation, schema bounds, city evidence validation, model tool dispatch and idempotency, exports, and the two-screen UI. The Apify actor-input assertion fixes the business count at 70 regardless of the person's target.
 
-Campaigns are draft/versioned. Start requires the current version, validates provider configuration, and durably records approval before submitting background work. Duplicate starts return the existing campaign. Edits are allowed only on drafts. Campaign progress, source run ID, per-company results, usage, and activity are persisted.
-
-The executor is bounded by `MAX_ACTIVE_RUNS`. Cancellation stops after the current provider request; an already-started Apify actor is not forcibly aborted. After a process restart, old active campaigns are marked interrupted and never automatically repeated. Partial leads remain available. A cloud failure saves recovery records and an outbox locally; authenticated requests attempt synchronization after access is restored. Retain the local data volume even with cloud storage.
-
-Run one backend process/replica. Execution locks and active capacity are in-process. The storage is durable, but this release is not a distributed task queue and does not resume partially completed provider operations automatically. This avoids accidentally repeating paid source jobs. Moving to multiple replicas requires a database lease/queue and provider-aware resumption.
-
-## Deployment and validation
-
-Docker serves the built React app and FastAPI from one origin. `ALLOW_LOCAL_WORKSPACE=false` requires authentication on workspace and legacy API routes. Place a TLS reverse proxy in front for internet use. Configure Supabase Auth site/redirect URLs for the deployed origin and appropriate email delivery before public registration.
-
-Automated backend tests cover the original provider behavior plus ownership, persistence, reservations, restart handling, all-source Hunter/NeverBounce convergence, exclusion before enrichment, grounded URL constraints, advisor idempotency, cloud request identity, and exports. Frontend tests cover category filters, draft creation, profile updates, and CRM edits. External provider calls are mocked in the suites; these tests do not establish live paid-account access, research quality on every brief, or actual lead yield.
-
-Suggested quality evaluation: maintain reviewed business briefs and company examples. Measure target selection, source compatibility, evidence support, irrelevant-company rate, verified-contact yield, requests per accepted lead, and whether the advisor revises weak hypotheses. Store explicit user feedback in CRM notes/stages for retrieval; no automatic model training occurs.
+Automated tests mock external providers. A live model dispatch smoke test uses isolated in-memory storage and a mocked executor, so it exercises real model/tool contracts without starting a paid scrape. Browser rendering, live paid-provider accounts, signup email delivery and deployment require separate integration validation.

@@ -34,6 +34,7 @@ export interface Plan {
   city: string;
   state: string;
   query: string;
+  locations?: { city: string; state: string }[];
   websites: string[];
   max_leads: number;
   rationale: string;
@@ -54,6 +55,23 @@ export interface Campaign {
   started_at?: string;
   completed_at?: string;
   apify_run_id?: string;
+  thread_id?: string;
+  shortfall?: number;
+  policy_version?: string;
+  locations?: {
+    city: string;
+    state: string;
+    status: string;
+    discovered: number;
+    processed: number;
+    leads: number;
+  }[];
+  recommendations?: {
+    city: string;
+    state: string;
+    reason: string;
+    evidence: Evidence[];
+  }[];
   progress: {
     discovered: number;
     processed: number;
@@ -61,6 +79,10 @@ export interface Campaign {
     review: number;
     excluded: number;
     reused: number;
+    target?: number;
+    rejected?: number;
+    no_contact?: number;
+    verification_errors?: number;
   };
   events: { at: string; message: string }[];
   warnings: string[];
@@ -208,9 +230,13 @@ export async function exportLeads(category = "verified", campaignId = "") {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 export const active = (campaign: Campaign) =>
-  ["queued", "discovering", "researching", "enriching"].includes(
-    campaign.status,
-  );
+  [
+    "queued",
+    "discovering",
+    "researching",
+    "enriching",
+    "recommending",
+  ].includes(campaign.status);
 export const stages: Stage[] = [
   "new",
   "qualified",
@@ -262,3 +288,13 @@ export function dateLabel(date?: string | null) {
       })
     : "—";
 }
+
+export const verificationLabel = (result?: string | null) =>
+  ({
+    valid: "Valid",
+    catchall: "Catch-all",
+    unknown: "Unknown",
+    invalid: "Invalid",
+    disposable: "Disposable",
+    verification_error: "Check failed",
+  })[result || ""] || "Not checked";

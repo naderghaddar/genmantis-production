@@ -16,25 +16,26 @@ import {
   type Campaign,
   type Thread,
   type Workspace,
-  sourceName,
+  active,
 } from "../../services/workspaceApi";
 import { Mark, Spinner } from "./Shared";
+import SearchRun from "./SearchRun";
 
 const starters = [
   {
     icon: <Compass size={19} />,
-    title: "Find my ideal customers",
-    text: "Help me identify the best customer segment for my business.",
+    title: "Find SEO prospects",
+    text: "Help me choose a local business niche for my SEO services.",
   },
   {
     icon: <Globe2 size={19} />,
-    title: "Research a market",
-    text: "Help me research a new market and build a targeting strategy.",
+    title: "Choose the right cities",
+    text: "Help me choose similar cities for an SEO outreach campaign.",
   },
   {
     icon: <Search size={19} />,
-    title: "Build a lead list",
-    text: "I want to build a list of companies that fit my offer. Help me choose the right source.",
+    title: "Fetch me 50 leads",
+    text: "Fetch me 50 leads for SEO outreach. Help me confirm the business niche and cities first.",
   },
 ];
 export default function Advisor({
@@ -53,6 +54,7 @@ export default function Advisor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pending, setPending] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const pendingId = useRef<{ text: string; id: string } | null>(null);
@@ -111,6 +113,18 @@ export default function Advisor({
       }
     }
   }
+  function suggest(text: string) {
+    setMessage(text);
+    input.current?.focus();
+  }
+  const attachedIds = new Set(
+    thread?.messages.flatMap((item) => item.campaign_ids || []) || [],
+  );
+  const unattached = workspace.campaigns.filter(
+    (campaign) =>
+      !attachedIds.has(campaign.id) &&
+      (active(campaign) || (thread ? campaign.thread_id === thread.id : true)),
+  );
   return (
     <div className="advisor-layout">
       <aside className="research-history">
@@ -162,7 +176,7 @@ export default function Advisor({
           <strong>Your business context</strong>
           <p>
             {workspace.profile.offer ||
-              "Add your offer and ideal customer in Business profile to make recommendations more relevant."}
+              "Tell your agent about your SEO offer, preferred business types and service area. Your conversation guides the search."}
           </p>
         </div>
       </aside>
@@ -175,7 +189,28 @@ export default function Advisor({
               <i /> {busy ? "Working on your request" : "Ready to research"}
             </span>
           </div>
-          <span className="subtle">Strategy → evidence → leads</span>
+          <select
+            className="mobile-conversation-select"
+            aria-label="Research conversation"
+            value={thread?.id || ""}
+            disabled={busy}
+            onChange={(event) => {
+              if (event.target.value) void select(event.target.value);
+              else {
+                setThread(null);
+                setMessage("");
+                setError("");
+              }
+            }}
+          >
+            <option value="">New conversation</option>
+            {workspace.threads.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.title}
+              </option>
+            ))}
+          </select>
+          <span className="subtle">SEO research → people → leads</span>
         </div>
         <div className="advisor-scroll" aria-live="polite">
           {!thread?.messages.length && !pending && (
@@ -185,14 +220,14 @@ export default function Advisor({
               </div>
               <p className="overline">YOUR NEXT OPPORTUNITY STARTS HERE</p>
               <h1>
-                Who should your business
+                Your next SEO clients.
                 <br />
-                connect with next?
+                One conversation away.
               </h1>
               <p>
-                Tell me what you sell and who you want to reach. We’ll find the
-                right market, research the evidence, and build a lead list worth
-                pursuing.
+                Tell me the businesses, cities and number of people you want to
+                reach. I’ll find their companies, discover the right contacts
+                and check their emails.
               </p>
               <div className="starter-grid">
                 {starters.map((item) => (
@@ -280,39 +315,42 @@ export default function Advisor({
                 </div>
                 {item.campaign_ids?.map((id) => {
                   const campaign = workspace.campaigns.find((c) => c.id === id);
-                  return (
-                    campaign && (
-                      <button
-                        key={id}
-                        className="proposal-card"
-                        onClick={() => review(campaign)}
-                      >
-                        <div>
-                          <span className="proposal-icon">
-                            <Compass size={20} />
-                          </span>
-                          <span>
-                            <small>
-                              CAMPAIGN PLAN · {sourceName(campaign.plan.source)}
-                            </small>
-                            <strong>{campaign.plan.name}</strong>
-                          </span>
-                          <ArrowRight size={18} />
-                        </div>
-                        <p>{campaign.plan.rationale}</p>
-                        <footer>
-                          <span>
-                            Up to {campaign.plan.max_leads} businesses
-                          </span>
-                          <span>Review plan →</span>
-                        </footer>
-                      </button>
-                    )
-                  );
+                  return campaign ? (
+                    <SearchRun
+                      key={id}
+                      campaign={campaign}
+                      refresh={refresh}
+                      viewLeads={() => review(campaign)}
+                      suggest={suggest}
+                    />
+                  ) : null;
                 })}
               </div>
             </div>
           ))}
+          {unattached.length > 0 && (
+            <section className="advisor-search-history">
+              <button
+                className="text-link"
+                onClick={() => setShowHistory(!showHistory)}
+              >
+                {showHistory
+                  ? "Show recent searches"
+                  : `Search history (${unattached.length})`}
+              </button>
+              {(showHistory ? unattached : unattached.slice(0, 3)).map(
+                (campaign) => (
+                  <SearchRun
+                    key={campaign.id}
+                    campaign={campaign}
+                    refresh={refresh}
+                    viewLeads={() => review(campaign)}
+                    suggest={suggest}
+                  />
+                ),
+              )}
+            </section>
+          )}
           {pending && (
             <div className="advisor-message user">
               <span className="user-avatar">Y</span>
@@ -328,8 +366,8 @@ export default function Advisor({
               <div className="message-body">
                 <Spinner label="Researching your request…" />
                 <small className="muted">
-                  Comparing sources and checking evidence. This may take a
-                  moment.
+                  Understanding your request and choosing the next research
+                  step.
                 </small>
               </div>
             </div>
@@ -349,7 +387,7 @@ export default function Advisor({
               value={message}
               maxLength={5000}
               rows={2}
-              placeholder="Describe your ideal customer, ask about a market, or share a company website…"
+              placeholder="Find me 50 dentist leads in Austin, Round Rock and Cedar Park, Texas…"
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -360,7 +398,10 @@ export default function Advisor({
             />
             <div>
               <span>
-                <Globe2 size={13} /> {researchAvailable ? "Web research available" : "Research provider not connected"}
+                <Globe2 size={13} />{" "}
+                {researchAvailable
+                  ? "Web research available"
+                  : "Research provider not connected"}
               </span>
               <button
                 aria-label="Send message"
@@ -371,8 +412,8 @@ export default function Advisor({
             </div>
           </form>
           <p>
-            Research uses live sources. Campaigns start only after you review
-            and approve the plan.
+            Ask to fetch leads to start a search. Each approved location
+            searches up to 70 businesses.
           </p>
         </div>
       </section>
