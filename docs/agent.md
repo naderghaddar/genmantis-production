@@ -1,3 +1,5 @@
+> **Legacy API documentation.** This document describes the retained `/api/agent` compatibility flow, not the active Research Advisor. For the current agent, tools, model configuration and same-city search loop, see [workspace architecture](workspace-architecture.md) and the [README](../README.md).
+
 # Conversational assistant architecture
 
 The existing lead providers, contact ranking, provider limits, one-contact-per-domain policy and two download routes remain. Chat prepares a plan and invokes that pipeline after explicit approval; it does not replace provider services.

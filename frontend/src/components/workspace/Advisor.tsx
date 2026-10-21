@@ -412,8 +412,8 @@ export default function Advisor({
             </div>
           </form>
           <p>
-            Ask to fetch leads to start a search. Each approved location
-            searches up to 70 businesses.
+            Ask to fetch leads to start. The agent deepens searches within your
+            selected cities until the target or search limits are reached.
           </p>
         </div>
       </section>

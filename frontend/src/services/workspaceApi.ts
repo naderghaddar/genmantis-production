@@ -37,6 +37,8 @@ export interface Plan {
   locations?: { city: string; state: string }[];
   websites: string[];
   max_leads: number;
+  email_policy?: "accepted" | "valid_only";
+  max_city_rounds?: number;
   rationale: string;
   qualification_criteria: string[];
   exclusions: string[];
@@ -58,6 +60,7 @@ export interface Campaign {
   thread_id?: string;
   shortfall?: number;
   policy_version?: string;
+  stop_reason?: string;
   locations?: {
     city: string;
     state: string;
@@ -65,6 +68,8 @@ export interface Campaign {
     discovered: number;
     processed: number;
     leads: number;
+    round?: number;
+    business_limit?: number;
   }[];
   recommendations?: {
     city: string;

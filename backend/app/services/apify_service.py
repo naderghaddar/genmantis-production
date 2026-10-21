@@ -39,8 +39,12 @@ class ApifyService:
     def __init__(self, client: ApifyClient) -> None:
         self.client = client
 
-    def start(self, request: ScrapeRequest) -> ScrapeStatus:
-        run = self.client.actor(ACTOR_ID).start(run_input=build_actor_input(request))
+    def start(self, request: ScrapeRequest, *, business_limit: int = 70) -> ScrapeStatus:
+        if type(business_limit) is not int or not 70 <= business_limit <= 350:
+            raise ValueError("Business limit must be between 70 and 350.")
+        actor_input = build_actor_input(request)
+        actor_input["maxCrawledPlacesPerSearch"] = business_limit
+        run = self.client.actor(ACTOR_ID).start(run_input=actor_input)
         return self._status(run)
 
     def get_run(self, run_id: str) -> dict[str, Any]:

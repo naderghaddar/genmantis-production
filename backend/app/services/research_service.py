@@ -128,10 +128,17 @@ class ResearchService:
             + "Find evidence about its services, location, ownership and customers relevant to: "
             + json.dumps({"profile": profile, "criteria": plan.qualification_criteria, "exclusions": plan.exclusions}), website=url)
         assessment = self.parse(Assessment, "Assess the company from this research only. Return fit, reasons, unknowns and cited evidence. "
-            "Set excluded=true only if a stated exclusion is established.\n" + json.dumps({"research": result,
+            "Check EVERY exact qualification criterion separately in criteria_checks with its verdict and evidence. Set excluded=true only if a stated exclusion is established.\n" + json.dumps({"research": result,
                 "criteria": plan.qualification_criteria, "exclusions": plan.exclusions, "profile": profile}))
         allowed = {source["url"].rstrip("/") for source in result["sources"]}
         assessment.evidence = [item for item in assessment.evidence if item.url.rstrip("/") in allowed]
+        for check in assessment.criteria_checks:
+            check.evidence = [item for item in check.evidence if item.url.rstrip("/") in allowed]
+        confirmed = {check.criterion for check in assessment.criteria_checks if check.verdict == "met" and check.evidence}
+        missing = [criterion for criterion in plan.qualification_criteria if criterion not in confirmed]
+        if missing and not assessment.excluded:
+            assessment.fit = "unknown"
+            assessment.unknowns.extend("Not established: " + criterion for criterion in missing)
         if not assessment.evidence:
             assessment.fit, assessment.excluded = "unknown", False
             assessment.reasons = []

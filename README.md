@@ -8,7 +8,7 @@ GenMantis has two screens: **Research Advisor** (the landing screen) and **Lead 
 
 The agent uses the business context from your conversation, asks for missing niche/geography when necessary, and starts a bounded background search when you explicitly ask to fetch leads. Planning-only requests produce drafts with an inline start button. There is no separate campaigns, dashboard, settings or pipeline screen.
 
-For Google Maps, Apify requests **70 businesses per location**. Hunter finds relevant named decision-makers; NeverBounce checks their emails. Multiple people can qualify at one company. Business counts do not count toward the lead target. The worker continues through the supplied cities until the requested number of new people is reached or the cities are exhausted. It stops before starting another city once the target is met.
+For Google Maps, Apify starts with **70 businesses per named city**. When a pass fills its source cap and supplies new domains, the worker can deepen that same city to 140, then 210 businesses (three passes by default; configurable from one to five). No new cities are added automatically. Hunter finds relevant named decision-makers; NeverBounce checks their emails. Multiple people can qualify at one company. Business counts do not count toward the lead target. The worker continues through the supplied cities and eligible deeper passes until the requested number of new people is reached or the cities/search budget are exhausted. It stops before another city, pass or email check once the target is met. Deeper Maps requests can repeat paid source results; repeated domains are never enriched twice within a run.
 
 A lead uses this workspace's policy:
 
@@ -19,7 +19,9 @@ A lead uses this workspace's policy:
 
 The exact NeverBounce status is shown in the database and exports. Catch-all and unknown are accepted under this product policy; they are not claims of confirmed deliverability.
 
-If a 100-lead search across three cities finds 30 people, the advisor shows **30/100 found, 70 remaining**, city-level results, and cited recommendations for similar cities. Recommendations are not scraped until the user asks to continue. A provider interruption is reported separately from an exhausted search. Partial saved leads remain available.
+If a 100-lead search across three cities finds 30 people, the advisor shows **30/100 found, 70 remaining**, city-level results, and cited recommendations for similar cities. Recommendations are not scraped until the user asks to continue. A provider interruption is reported separately from an exhausted search. Partial saved leads remain available. The run exposes its exact stop reason and city passes; a finite city list cannot guarantee any requested lead count.
+
+The advisor can remember agency facts you supply, compare niches and cities using cited web research, inspect CRM stage/email-status totals, and stop a search through conversation. Business memory is owner-scoped and does not overwrite unmentioned fields. Requested positive company-fit criteria need individual cited evidence; unknown fit is not counted as a qualified lead. Ordinary searches do not require company research. `email_policy=valid_only` is available if explicitly requested; the default remains valid/catch-all/unknown.
 
 ## Run locally on Windows
 
@@ -42,7 +44,7 @@ Open http://127.0.0.1:5173. Restart the backend after changing Python code or `.
 
 ## Configuration and persistence
 
-The existing `backend/.env.example` documents provider configuration. Required services are OpenAI (advisor/research), Apify (Maps), Hunter (people) and NeverBounce (email checks). `OPENAI_MODEL` chooses the Responses API model; the model must support function calling, web search and structured output. Model and provider work incur their respective account charges.
+The existing `backend/.env.example` documents provider configuration. Required services are OpenAI (advisor/research), Apify (Maps), Hunter (people) and NeverBounce (email checks). `OPENAI_MODEL` chooses the Responses API model; the model must support function calling, web search and structured output. The configured model is preserved (`gpt-6.1-sol` in the existing local environment). Model and provider work incur their respective account charges.
 
 Only production Supabase project **`cpuhytycdbthpqvevjmc`** (`gemantis-production` in Supabase) is configured. Vougamed and the legacy CRM project are not used. The existing `gm_workspace_records` table and its ownership RLS policies store account records. This update needs no SQL migration. Provider credentials remain in the ignored backend environment file.
 
@@ -51,10 +53,11 @@ Supabase email/password sign-in is available through the account control. Local 
 ## Bounds and execution
 
 - Up to 1,000 requested people and 30 explicitly supplied cities per search.
-- Up to 70 source businesses per city; the provider can return fewer.
+- Starts at 70 source businesses per city; deeper passes increase the cap by 70, to 210 by default and 350 at the five-pass maximum. The provider can return fewer. Unsaturated batches and duplicate-only passes are not repeated. Existing drafts retain their original one-pass budget.
 - Hunter's configured page/result limits bound contact discovery. All suitable named people returned within those limits are checked until the lead target is reached.
 - Company research uses `RESEARCH_MAX_CALLS` (default 60); shortfall city research reserves two additional model requests. Unsupported evidence stays unknown.
 - Run one backend process/replica. Execution capacity uses `MAX_ACTIVE_RUNS` (default 1).
+- Hunter/NeverBounce authentication or quota failures stop further discovery instead of spending on more cities. Three consecutive email-check errors also stop the run.
 - Cancellation stops after the current provider request and does not forcibly abort an existing Apify actor. Restarted active work is marked interrupted and is never silently repeated.
 
 Web discovery and supplied websites remain available as advisor tools, also using Hunter and NeverBounce. The removed manual legacy UI is not part of the application navigation; older API contracts remain for compatibility.
@@ -69,7 +72,14 @@ npm.cmd test
 npm.cmd run build
 ```
 
-Tests cover all accepted/rejected email outcomes, named-person rules, multiple contacts per company, duplicate suppression, stopping at the target, cancellation, city shortfalls and recommendations, agent dispatch, exports and two-screen navigation. Provider calls are mocked in automated tests. A live model dispatch check uses a mocked worker so it never starts paid scraping or enrichment.
+Tests cover all accepted/rejected email outcomes, named-person rules, multiple contacts per company, duplicate suppression, stopping at the target, cancellation, city shortfalls and recommendations, agent dispatch, exports and two-screen navigation. Provider calls are mocked in automated tests. A live model dispatch check uses a mocked worker so it never starts paid scraping or enrichment. Run it only when needed (it incurs model charges):
+
+```cmd
+cd backend
+.venv\Scripts\python.exe scripts/smoke_advisor.py --live
+```
+
+The October 21, 2026 smoke check used five requests on the configured `gpt-6.1-sol`: an incomplete brief produced a clarification; a complete 60-person Austin request produced exactly one queued search with the requested email policy and three-pass budget.
 
 `docker compose up --build -d` builds the frontend and serves it with FastAPI at http://127.0.0.1:8000. Configure TLS, Supabase Auth URLs and email delivery before public deployment. Browser visual QA and live paid-provider integration still require validation in an enabled environment.
 

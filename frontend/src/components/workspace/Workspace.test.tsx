@@ -180,6 +180,23 @@ const campaign: Campaign = {
 };
 
 describe("Focused lead workspace", () => {
+  it("shows search depth, repeated city passes and the exact email policy", () => {
+    render(<SearchRun campaign={{...campaign, status: "enriching",
+      plan: {...campaign.plan, email_policy: "valid_only", max_city_rounds: 3},
+      locations: [{city: "Austin", state: "Texas", round: 2, business_limit: 140,
+        status: "enriching", discovered: 140, processed: 80, leads: 30}]}}
+      refresh={vi.fn()} viewLeads={vi.fn()} suggest={vi.fn()} />);
+    expect(screen.getByText(/up to 3 passes/)).toBeInTheDocument();
+    expect(screen.getByText(/Austin, Texas · Pass 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Only NeverBounce valid emails count/)).toBeInTheDocument();
+  });
+  it("explains provider exhaustion without claiming the target was reached", () => {
+    render(<SearchRun campaign={{...campaign, status: "failed", stop_reason: "hunter_quota_exhausted"}}
+      refresh={vi.fn()} viewLeads={vi.fn()} suggest={vi.fn()} />);
+    expect(screen.getByText("Hunter credits or usage allowance are exhausted.")).toBeInTheDocument();
+    expect(screen.getByText("Search interrupted")).toBeInTheDocument();
+    expect(screen.queryByText("Target reached")).not.toBeInTheDocument();
+  });
   it("opens the agent and exposes only advisor and lead database navigation", async () => {
     window.location.hash = "overview";
     vi.mocked(api).mockImplementation(async (path) =>

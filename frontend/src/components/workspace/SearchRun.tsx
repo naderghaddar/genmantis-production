@@ -48,10 +48,22 @@ export default function SearchRun({
     enriching: "Finding people",
     recommending: "Researching similar cities",
     completed: "Target reached",
-    shortfall: "More cities needed",
+    shortfall: "Target not yet reached",
     failed: "Search interrupted",
     cancelled: "Stopped",
     interrupted: "Interrupted",
+  };
+  const stopReasons: Record<string, string> = {
+    city_depth_budget_reached: "The configured search depth was reached. You can request a larger pass budget or select more cities.",
+    approved_locations_exhausted: "No further results were available in the selected cities.",
+    hunter_quota_exhausted: "Hunter credits or usage allowance are exhausted.",
+    neverbounce_quota_exhausted: "NeverBounce credits or usage allowance are exhausted.",
+    hunter_authentication_error: "Hunter authentication needs attention.",
+    neverbounce_authentication_error: "NeverBounce authentication needs attention.",
+    hunter_rate_limit_cooldown: "Hunter requires a cooldown before more requests.",
+    neverbounce_rate_limit_cooldown: "NeverBounce requires a cooldown before more requests.",
+    contact_provider_unavailable: "Contact discovery failed repeatedly. Saved leads are retained.",
+    email_provider_unavailable: "Email checks failed repeatedly. Failed checks did not count as leads.",
   };
   return (
     <section className="search-run" aria-label={campaign.plan.name}>
@@ -84,6 +96,9 @@ export default function SearchRun({
           .join(" · ") || "Supplied company websites"}
       </p>
       <p>{campaign.message}</p>
+      {campaign.stop_reason && stopReasons[campaign.stop_reason] && (
+        <p className="muted">{stopReasons[campaign.stop_reason]}</p>
+      )}
       {running && (
         <Spinner
           label={
@@ -93,12 +108,15 @@ export default function SearchRun({
           }
         />
       )}
-      {campaign.status === "draft" && (
+      {(campaign.status === "draft" || running) && (
         <p className="muted">
-          Up to 70 businesses per location. The search continues through these
-          locations until {target} new people are found or the locations are
-          exhausted.
+          Starts with 70 businesses per city, with up to {campaign.plan.max_city_rounds ?? 1} passes
+          in these cities only. Stops at {target} new people or when the available
+          results or search budget are exhausted.
         </p>
+      )}
+      {!!campaign.progress.review && (
+        <p className="muted">{campaign.progress.review} businesses had insufficient evidence for your criteria and did not count toward the target.</p>
       )}
       {!!campaign.locations?.length && (
         <details className="search-breakdown">
@@ -112,6 +130,7 @@ export default function SearchRun({
                 <span>
                   {item.city || "Websites"}
                   {item.state ? ", " + item.state : ""}
+                  {(item.round ?? 1) > 1 ? ` · Pass ${item.round}` : ""}
                 </span>
                 <strong>{item.leads} leads</strong>
                 <small>
@@ -163,8 +182,10 @@ export default function SearchRun({
         </details>
       )}
       <small className="search-policy">
-        Verified includes NeverBounce valid, catch-all and unknown. Exact email
-        statuses remain visible in your lead database.
+        {campaign.plan.email_policy === "valid_only"
+          ? "Only NeverBounce valid emails count toward this target."
+          : "Verified includes NeverBounce valid, catch-all and unknown. Catch-all and unknown do not confirm deliverability."}
+        {" "}Exact email statuses remain visible in your lead database.
       </small>
       {error && (
         <p role="alert" className="error-banner">

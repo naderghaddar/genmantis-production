@@ -302,10 +302,11 @@ def test_requested_100_three_cities_yield_30_and_recommend_more(workspace,monkey
     campaign=service.create(user,multi_plan())
     service._run(user,campaign,Event())
     result=store.get(user,'campaign',campaign['id'])
-    assert searched==['Austin','Round Rock','Cedar Park']
+    assert searched==['Austin','Round Rock','Cedar Park'] * 2
     assert result['status']=='shortfall' and result['shortfall']==70
     assert result['progress']['verified']==30 and result['progress']['discovered']==210
-    assert [item['leads'] for item in result['locations']]==[10,10,10]
+    assert [item['leads'] for item in result['locations']]==[10,10,10,0,0,0]
+    assert hunter.search.call_count == 210  # repeated Maps rows never repeat enrichment
     assert len(store.list(user,'lead'))==30 and nb.verify.call_count==30
     assert '30 of 100' in result['message']
     assert result['recommendations'][0]['city']=='Georgetown'
@@ -452,4 +453,196 @@ def test_editing_target_and_starting_older_draft_updates_progress(workspace):
     assert edited['progress']['target']==100
     started=service.start(user,campaign['id'],2)
     assert started['locations']==[] and started['progress']['verification_errors']==0
-    assert started['policy_version']=='person-v2'
+    assert started['policy_version']=='person-v3'
+
+
+def test_sixty_people_requires_deeper_same_city_and_stops_exactly(workspace, monkeypatch):
+    from threading import Event
+    import re
+    store, service, user = workspace
+    passes = []
+    def discover(plan, campaign, *args):
+        limit = campaign['locations'][-1]['business_limit']
+        passes.append((plan.city, limit))
+        return [{'title': f'Clinic {i}', 'website': f'https://clinic{i}.com'} for i in range(limit)]
+    service._discover = discover
+    def search(domain):
+        i = int(re.search(r'(\d+)\.com', domain)[1])
+        return HunterSearch(contacts=[person('pat@' + domain)] if i % 2 == 0 else [])
+    hunter, nb = mock_people(monkeypatch, search, lambda email: Verification(result='unknown'))
+    campaign = service.create(user, plan(max_leads=60))
+    service._run(user, campaign, Event())
+    result = store.get(user, 'campaign', campaign['id'])
+    assert passes == [('Austin', 70), ('Austin', 140)]
+    assert result['status'] == 'completed' and result['progress']['verified'] == 60
+    assert result['shortfall'] == 0 and result['stop_reason'] == 'target_reached'
+    assert len(store.list(user, 'lead')) == 60 and nb.verify.call_count == 60
+    assert hunter.search.call_count == 119
+    assert result['progress']['discovered'] == 140
+
+
+@pytest.mark.parametrize('rounds', [1, 3, 5])
+def test_city_depth_budget_and_no_unapproved_city(workspace, monkeypatch, rounds):
+    from threading import Event
+    store, service, user = workspace
+    limits = []
+    def discover(plan, campaign, *args):
+        assert plan.city == 'Austin' and plan.state == 'Texas'
+        limit = campaign['locations'][-1]['business_limit']
+        limits.append(limit)
+        return [{'title': f'Clinic {i}', 'website': f'https://clinic{i}.com'} for i in range(limit)]
+    service._discover = discover
+    hunter, nb = mock_people(monkeypatch, lambda domain: HunterSearch(), lambda email: Verification(result='valid'))
+    campaign = service.create(user, plan(max_leads=60, max_city_rounds=rounds))
+    service._run(user, campaign, Event())
+    result = store.get(user, 'campaign', campaign['id'])
+    assert limits == [70 * i for i in range(1, rounds + 1)]
+    assert result['status'] == 'shortfall' and result['shortfall'] == 60
+    assert result['stop_reason'] == 'city_depth_budget_reached'
+    assert hunter.search.call_count == rounds * 70
+    nb.verify.assert_not_called()
+
+
+def test_unsaturated_city_is_not_repeated(workspace, monkeypatch):
+    from threading import Event
+    store, service, user = workspace
+    service._discover = MagicMock(return_value=[{'title': 'Clinic', 'website': 'https://clinic.com'}])
+    mock_people(monkeypatch, lambda domain: HunterSearch(), lambda email: Verification(result='valid'))
+    campaign = service.create(user, plan())
+    service._run(user, campaign, Event())
+    service._discover.assert_called_once()
+    assert store.get(user, 'campaign', campaign['id'])['stop_reason'] == 'approved_locations_exhausted'
+
+
+def test_valid_only_never_counts_catchall_or_unknown(workspace, monkeypatch):
+    from threading import Event
+    store, service, user = workspace
+    service._discover = lambda *args: [{'title': 'Clinic', 'website': 'https://clinic.com'}]
+    statuses = iter(['catchall', 'unknown', 'valid'])
+    mock_people(monkeypatch, lambda domain: HunterSearch(contacts=[person(f'p{i}@clinic.com') for i in range(3)]),
+        lambda email: Verification(result=next(statuses)))
+    campaign = service.create(user, plan(max_leads=1, email_policy='valid_only'))
+    service._run(user, campaign, Event())
+    assert [row['lead']['verification']['result'] for row in store.list(user, 'lead')] == ['valid']
+    assert campaign['progress']['rejected'] == 2
+
+
+@pytest.mark.parametrize('provider', ['hunter', 'neverbounce'])
+def test_provider_quota_stops_before_spending_on_more_cities(workspace, monkeypatch, provider):
+    from threading import Event
+    store, service, user = workspace
+    service._discover = MagicMock(return_value=[{'title': 'Clinic', 'website': 'https://clinic.com'}])
+    hunter, nb = mock_people(monkeypatch,
+        lambda domain: HunterSearch(reason='hunter_quota_exhausted') if provider == 'hunter' else HunterSearch(contacts=[person('pat@clinic.com')]),
+        lambda email: Verification(result='verification_error', failure_reason='neverbounce_quota_exhausted'))
+    campaign = service.create(user, multi_plan(60))
+    service._run(user, campaign, Event())
+    assert campaign['status'] == 'failed' and campaign['shortfall'] == 60
+    service._discover.assert_called_once()
+    assert campaign['progress']['verified'] == 0
+
+
+def test_unknown_requested_fit_does_not_count_or_spend_on_enrichment(workspace, monkeypatch):
+    from threading import Event
+    store, service, user = workspace
+    service._discover = lambda *args: [{'title': 'Clinic', 'website': 'https://clinic.com'}]
+    monkeypatch.setattr(ResearchService, 'assess', lambda *args: {'fit': 'unknown', 'excluded': False})
+    hunter, nb = mock_people(monkeypatch, lambda domain: HunterSearch(), lambda email: Verification(result='valid'))
+    value = CampaignPlan(name='Fit', source='company_websites', niche='dentists', websites=['https://clinic.com'],
+        qualification_criteria=['Owner operated'], research_websites=True)
+    campaign = service.create(user, value)
+    service._run(user, campaign, Event())
+    assert campaign['progress']['review'] == 1 and campaign['progress']['verified'] == 0
+    hunter.search.assert_not_called()
+
+
+def test_business_memory_partial_update_and_owner_isolation(workspace, settings):
+    store, service, user = workspace
+    agent = ResearchAgent(settings, store, service)
+    agent.execute('remember_business_context', {'offer': 'SEO for dental clinics', 'geography': 'Texas'}, user, None, [])
+    agent.execute('remember_business_context', {'offer': None, 'geography': 'Ontario'}, user, None, [])
+    profile = store.get(user, 'profile', 'business')['profile']
+    assert profile['offer'] == 'SEO for dental clinics' and profile['geography'] == 'Ontario'
+    assert store.list(store.identity('other'), 'profile') == []
+    with pytest.raises(ValueError):
+        agent.execute('remember_business_context', {'invented': 'field'}, user, None, [])
+
+
+def test_stop_tool_cannot_cancel_another_workspace(workspace, settings):
+    store, service, user = workspace
+    service.executor.submit = MagicMock()
+    campaign = service.create(user, plan())
+    service.start(user, campaign['id'], 1)
+    agent = ResearchAgent(settings, store, service)
+    with pytest.raises(HTTPException):
+        agent.execute('stop_lead_search', {'campaign_id': campaign['id']}, store.identity('other'), None, [])
+    assert not service.jobs[campaign['id']].is_set()
+    assert agent.execute('stop_lead_search', {'campaign_id': campaign['id']}, user, None, [])['requested']
+    assert service.jobs[campaign['id']].is_set()
+
+
+def test_deeper_actor_input_keeps_original_geography(sdk, search_request):
+    from app.services.apify_service import ApifyService
+    service = ApifyService(sdk)
+    service.start(search_request, business_limit=140)
+    payload = sdk.actor.return_value.start.call_args.kwargs['run_input']
+    assert payload['maxCrawledPlacesPerSearch'] == 140
+    assert payload['locationQuery'] == 'Austin, Texas'
+    with pytest.raises(ValueError):
+        service.start(search_request, business_limit=1000)
+
+
+@pytest.mark.parametrize('verdict,cited,expected_fit', [('met', True, 'strong'), ('met', False, 'unknown'), ('unknown', True, 'unknown')])
+def test_positive_criteria_need_individual_cited_evidence(settings, verdict, cited, expected_fit):
+    from app.models.workspace import Assessment
+    research = ResearchService(settings)
+    evidence = {'title': 'Clinic', 'url': 'https://clinic.com/about', 'observation': 'Owner operated'}
+    research.search = MagicMock(return_value={'summary': 'Clinic', 'sources': [{'url': evidence['url']}]})
+    research.parse = MagicMock(return_value=Assessment(summary='Company fit', fit='strong', reasons=[], unknowns=[],
+        excluded=False, evidence=[evidence], criteria_checks=[{'criterion': 'Owner operated', 'verdict': verdict,
+            'evidence': [evidence] if cited else []}]))
+    value = CampaignPlan(name='Fit', source='company_websites', niche='dentists', websites=['https://clinic.com'],
+        qualification_criteria=['Owner operated'], research_websites=True)
+    result = research.assess(Business(business_website='https://clinic.com'), value, {})
+    assert result['fit'] == expected_fit
+
+
+def test_workspace_cannot_run_concurrent_new_person_targets(workspace):
+    store, service, user = workspace
+    service.settings = replace(service.settings, max_active_runs=3)
+    service.executor.submit = MagicMock()
+    first = service.create(user, plan())
+    service.start(user, first['id'], 1)
+    second = service.create(user, plan())
+    with pytest.raises(HTTPException) as error:
+        service.start(user, second['id'], 1)
+    assert error.value.status_code == 409
+    assert store.get(user, 'campaign', second['id'])['status'] == 'draft'
+
+
+def test_older_draft_keeps_its_original_one_pass_budget(workspace):
+    store, service, user = workspace
+    service.executor.submit = MagicMock()
+    campaign = service.create(user, plan())
+    campaign['plan'].pop('max_city_rounds')
+    campaign['plan'].pop('email_policy')
+    store.save(user, 'campaign', campaign)
+    started = service.start(user, campaign['id'], 1)
+    assert started['plan']['max_city_rounds'] == 1
+    assert started['plan']['email_policy'] == 'accepted'
+
+
+@pytest.mark.parametrize('provider', ['hunter', 'neverbounce'])
+def test_repeated_provider_errors_trip_circuit_breaker(workspace, monkeypatch, provider):
+    from threading import Event
+    store, service, user = workspace
+    service._discover = MagicMock(return_value=[{'title': f'Clinic {i}', 'website': f'https://clinic{i}.com'} for i in range(70)])
+    hunter, nb = mock_people(monkeypatch,
+        lambda domain: HunterSearch(reason='hunter_network_error') if provider == 'hunter' else HunterSearch(contacts=[person('pat@' + domain)]),
+        lambda email: Verification(result='verification_error', failure_reason='neverbounce_network_error'))
+    campaign = service.create(user, multi_plan(60))
+    service._run(user, campaign, Event())
+    assert campaign['status'] == 'failed' and campaign['shortfall'] == 60
+    assert hunter.search.call_count == 3
+    assert nb.verify.call_count == (3 if provider == 'neverbounce' else 0)
+    service._discover.assert_called_once()
