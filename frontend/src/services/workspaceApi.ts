@@ -37,6 +37,7 @@ export interface Plan {
   locations?: { city: string; state: string }[];
   websites: string[];
   max_leads: number;
+  max_leads_per_company?: number | null;
   email_policy?: "accepted" | "valid_only";
   max_city_rounds?: number;
   rationale: string;

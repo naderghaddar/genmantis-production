@@ -52,6 +52,8 @@ class CampaignPlan(Strict):
     websites: list[str] = Field(default_factory=list, max_length=70)
     max_leads: int = Field(default=50, ge=1, le=1000, strict=True,
         description="Requested number of NEW unique people with Hunter emails checked by NeverBounce as valid, catchall or unknown. This is NOT a business/scrape limit. Google Maps starts with 70 businesses per location and can deepen within those cities.")
+    max_leads_per_company: int | None = Field(default=1, ge=1, le=1000, strict=True,
+        description="Maximum saved leads per company domain, including existing workspace leads. Default 1. For '200 leads from 200 unique companies' set max_leads=200 and this field=1. Use a higher number when requested, or null only for explicitly unlimited contacts per company. Duplicate emails are always excluded.")
     rationale: str = Field(default="", max_length=3000)
     qualification_criteria: list[str] = Field(default_factory=list, max_length=6,
         description="Additional company-fit requirements to assess from website evidence. Do not repeat niche, location or lead-count fields. Must be [] when research_websites is false.")

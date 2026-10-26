@@ -277,6 +277,152 @@ def person(email):
     return Contact(email=email,first_name="Pat",last_name="Owner",job_title="Owner")
 
 
+@pytest.mark.parametrize('limit,expected', [(1, 1), (2, 2), (None, 3)])
+def test_company_limit_checks_next_candidate_after_rejection(workspace, monkeypatch, limit, expected):
+    from threading import Event
+    store, service, user = workspace
+    service._discover = lambda *args: [{'title': 'Clinic', 'website': 'https://clinic.com'}]
+    hunter, nb = mock_people(monkeypatch,
+        lambda domain: HunterSearch(contacts=[person(f'{name}@clinic.com') for name in ['bad', 'pat', 'sam', 'alex']]),
+        lambda email: Verification(result='invalid' if email.startswith('bad@') else 'valid'))
+    campaign = service.create(user, plan(max_leads=5, max_leads_per_company=limit))
+    service._run(user, campaign, Event())
+    result = store.get(user, 'campaign', campaign['id'])
+    assert result['progress']['verified'] == expected
+    assert result['shortfall'] == 5 - expected
+    assert nb.verify.call_count == expected + 1
+    assert len(store.list(user, 'lead')) == expected
+
+
+def test_200_leads_require_200_unique_companies(workspace, monkeypatch):
+    from threading import Event
+    store, service, user = workspace
+    def discover(local_plan, *args):
+        prefix = local_plan.city.lower().replace(' ', '')
+        return [{'title': f'{prefix} Clinic {i}', 'website': f'https://{prefix}{i}.com'} for i in range(70)]
+    service._discover = discover
+    hunter, nb = mock_people(monkeypatch,
+        lambda domain: HunterSearch(contacts=[person(name + '@' + domain) for name in ['pat', 'sam', 'alex']]),
+        lambda email: Verification(result='valid'))
+    campaign = service.create(user, multi_plan(200))
+    service._run(user, campaign, Event())
+    records = store.list(user, 'lead')
+    assert len(records) == len({row['domain'] for row in records}) == 200
+    assert hunter.search.call_count == nb.verify.call_count == 200
+    assert store.get(user, 'campaign', campaign['id'])['status'] == 'completed'
+
+
+@pytest.mark.parametrize('limit,expected_checks', [(1, 0), (2, 1)])
+def test_saved_company_cap_applies_to_subdomains_and_existing_leads(workspace, monkeypatch, limit, expected_checks):
+    from threading import Event
+    store, service, user = workspace
+    existing = {'id': 'legacy', 'domain': 'WWW.CLINIC.CO.UK', 'notes': 'Keep my CRM notes',
+        'stage': 'archived', 'category': 'excluded',
+        'lead': {'contact': {'email': ' Pat@Clinic.co.uk '}, 'verification': {'result': 'invalid'}}}
+    store.save(user, 'lead', existing)
+    service._discover = lambda *args: [{'title': 'Other branch', 'website': 'https://austin.clinic.co.uk/team'}]
+    hunter, nb = mock_people(monkeypatch,
+        lambda domain: HunterSearch(contacts=[person('pat@clinic.co.uk'), person('sam@clinic.co.uk'), person('alex@clinic.co.uk')]),
+        lambda email: Verification(result='valid'))
+    campaign = service.create(user, plan(max_leads=10, max_leads_per_company=limit))
+    service._run(user, campaign, Event())
+    assert hunter.search.call_count == expected_checks
+    assert nb.verify.call_count == expected_checks
+    assert len(store.list(user, 'lead')) == 1 + expected_checks
+    assert store.get(user, 'lead', 'legacy') == existing
+
+
+def test_saved_email_dedup_is_independent_of_company_and_current_policy(workspace, monkeypatch):
+    from threading import Event
+    store, service, user = workspace
+    store.save(user, 'lead', {'id': 'old', 'domain': 'old.com', 'category': 'excluded',
+        'lead': {'contact': {'email': ' Pat@shared.com '}, 'verification': {'result': 'invalid'}}})
+    service._discover = lambda *args: [{'title': 'New company', 'website': 'https://new.com'}]
+    hunter, nb = mock_people(monkeypatch,
+        lambda domain: HunterSearch(contacts=[person('PAT@SHARED.COM'), person('sam@new.com')]),
+        lambda email: Verification(result='valid'))
+    index_read = MagicMock(wraps=store.lead_index)
+    monkeypatch.setattr(store, 'lead_index', index_read)
+    campaign = service.create(user, plan(max_leads=1))
+    service._run(user, campaign, Event())
+    index_read.assert_called_once_with(user)
+    nb.verify.assert_called_once_with('sam@new.com')
+    assert store.get(user, 'campaign', campaign['id'])['progress']['verified'] == 1
+    assert len(store.list(user, 'lead')) == 2
+
+
+@pytest.mark.parametrize('bad', [0, -1, 1001, 1.5, True, '2'])
+def test_company_limit_validation(bad):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        plan(max_leads_per_company=bad)
+
+
+def test_company_limit_reaches_both_advisor_tools(workspace):
+    store, service, user = workspace
+    agent = ResearchAgent(service.settings, store, service)
+    service.start = MagicMock(side_effect=lambda identity, record_id, version: store.get(identity, 'campaign', record_id))
+    for name in ('generate_leads', 'propose_campaign'):
+        schema = next(tool['parameters'] for tool in RESEARCH_TOOLS if tool['name'] == name)
+        assert 'max_leads_per_company' in schema['required']
+        for limit in (1, 3, None):
+            result = agent.execute(name, plan(max_leads=200, max_leads_per_company=limit).model_dump(), user, None, [])
+            assert result['plan']['max_leads_per_company'] == limit
+
+
+def test_compact_lead_index_is_owner_scoped_and_counts_unique_emails(workspace):
+    store, service, user = workspace
+    for record_id in ('a', 'b'):
+        store.save(user, 'lead', {'id': record_id, 'website': 'https://branch.clinic.com',
+            'lead': {'contact': {'email': ' PAT@clinic.com '}}})
+    store.save(store.identity('other'), 'lead', {'id': 'private', 'domain': 'clinic.com',
+        'lead': {'contact': {'email': 'private@clinic.com'}}})
+    index = store.lead_index(user)
+    assert index.emails == {'pat@clinic.com'}
+    assert index.company_counts == {'clinic.com': 1}
+    query_plan = store.db.execute("EXPLAIN QUERY PLAN SELECT id FROM workspace_records WHERE owner=? AND kind='lead'", (user.owner,)).fetchall()
+    assert any('USING' in row[3] and 'INDEX' in row[3] for row in query_plan)
+
+
+def test_cloud_lead_index_paginates_keys_and_includes_pending_recovery(workspace, monkeypatch):
+    store, service, local = workspace
+    user = store.identity('cloud', 'jwt')
+    store.recovery_save(user, 'lead', {'id': 'pending', 'domain': 'pending.com', 'lead': {'contact': {'email': 'pat@pending.com'}}})
+    store.recovery_save(store.identity('other', 'jwt2'), 'lead', {'id': 'private', 'domain': 'private.com', 'lead': {'contact': {'email': 'private@private.com'}}})
+    page = [{'record_id': f'{i:04}', 'email': f'pat@clinic{i}.com', 'domain': f'clinic{i}.com'} for i in range(500)]
+    remote = MagicMock(side_effect=[page, [{'record_id': '0500', 'email': 'last@clinic.com', 'domain': 'clinic.com'}]])
+    monkeypatch.setattr(store, '_remote', remote)
+    index = store.lead_index(user)
+    assert len(index.emails) == 502
+    assert 'pat@pending.com' in index.emails and 'private@private.com' not in index.emails
+    first, second = remote.call_args_list
+    assert first.args[2]['owner_id'] == 'eq.cloud'
+    assert first.args[2]['kind'] == 'eq.lead'
+    assert first.args[2]['select'] != 'data'
+    assert 'offset' not in second.args[2]
+    assert second.args[2]['record_id'] == 'gt.0499'
+
+
+def test_insert_lead_preserves_existing_record_and_is_owner_scoped(workspace):
+    store, service, user = workspace
+    original = {'id': 'same-email-hash', 'notes': 'Contacted yesterday', 'stage': 'contacted'}
+    assert store.insert_lead(user, original)
+    assert not store.insert_lead(user, {'id': original['id'], 'notes': '', 'stage': 'new'})
+    assert store.get(user, 'lead', original['id']) == original
+    assert store.insert_lead(store.identity('other'), {'id': original['id']})
+
+
+def test_cloud_insert_lead_ignores_conflicts_without_overwriting_recovery(workspace, monkeypatch):
+    store, service, local = workspace
+    user = store.identity('cloud', 'jwt')
+    request = MagicMock(return_value=httpx.Response(201, json=[]))
+    monkeypatch.setattr(httpx, 'request', request)
+    assert not store.insert_lead(user, {'id': 'existing', 'notes': 'Do not replace'})
+    assert request.call_args.kwargs['headers']['Prefer'] == 'resolution=ignore-duplicates,return=representation'
+    assert request.call_args.kwargs['json']['owner_id'] == 'cloud'
+    assert store.db.execute("SELECT count(*) FROM workspace_records WHERE owner='cloud'").fetchone()[0] == 0
+
+
 def multi_plan(target=100):
     return CampaignPlan(name="Texas dentists",source="google_maps",niche="dentists",max_leads=target,research_websites=False,
         locations=[{"city":city,"state":"Texas"} for city in ["Austin","Round Rock","Cedar Park"]])
@@ -339,12 +485,12 @@ def test_multiple_people_per_business_and_email_deduplication(workspace,monkeypa
     store,service,user=workspace
     service._discover=lambda *args:[{'title':'One','website':'https://one.com'},{'title':'Two','website':'https://two.com'}]
     hunter,nb=mock_people(monkeypatch,lambda domain:HunterSearch(contacts=[person('Pat@shared.com'),person('pat@shared.com'),person('sam@'+domain)]),lambda email:Verification(result='catchall'))
-    campaign=service.create(user,plan(max_leads=3))
+    campaign=service.create(user,plan(max_leads=3, max_leads_per_company=2))
     service._run(user,campaign,Event())
     assert len(store.list(user,'lead'))==3 and nb.verify.call_count==3
     assert store.get(user,'campaign',campaign['id'])['progress']['verified']==3
     # A second request cannot recount saved contacts as new leads.
-    repeated=service.create(user,plan(max_leads=3))
+    repeated=service.create(user,plan(max_leads=3, max_leads_per_company=2))
     service._run(user,repeated,Event())
     assert store.get(user,'campaign',repeated['id'])['progress']['verified']==0
     assert nb.verify.call_count==3

@@ -13,6 +13,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.models.workspace import now
+from app.services.lead_index import LeadIndex
 
 KINDS = {"profile", "campaign", "lead", "thread"}
 
@@ -50,11 +51,11 @@ class WorkspaceStore:
         with self.lock:
             return self.owner_locks.setdefault(owner, RLock())
 
-    def _remote(self, identity, method, params=None, payload=None):
+    def _remote(self, identity, method, params=None, payload=None, *, insert_only=False):
         try:
             response = httpx.request(method, self.url + "/rest/v1/gm_workspace_records",
                 headers={"apikey": self.key, "Authorization": "Bearer " + identity.token,
-                         "Prefer": "resolution=merge-duplicates,return=representation"},
+                         "Prefer": "resolution=" + ("ignore-duplicates" if insert_only else "merge-duplicates") + ",return=representation"},
                 params=params, json=payload, timeout=20)
         except httpx.HTTPError:
             raise HTTPException(503, "Cloud storage is unavailable. Please retry.") from None
@@ -92,6 +93,53 @@ class WorkspaceStore:
             if row:
                 return json.loads(row[0])
         raise HTTPException(404, "Record not found in this workspace.")
+
+    def lead_index(self, identity):
+        """Read only deduplication keys once, using the owner/kind primary-key prefix.
+
+        Include all statuses and pending cloud recovery results. Provider checks
+        then use O(1) membership/count lookups instead of scanning CRM payloads.
+        """
+        rows = {}
+        if identity.token:
+            after = None
+            while True:
+                params = {"owner_id": "eq." + identity.owner, "kind": "eq.lead",
+                    "select": "record_id,email:data->lead->contact->>email,domain:data->>domain,website:data->>website,company_domain:data->lead->business->>business_domain,company_website:data->lead->business->>business_website",
+                    "order": "record_id.asc", "limit": "500"}
+                if after is not None:
+                    params["record_id"] = "gt." + after
+                page = self._remote(identity, "GET", params)
+                rows.update((row["record_id"], row) for row in page)
+                if len(page) < 500:
+                    break
+                after = page[-1]["record_id"]
+        table = "workspace_outbox" if identity.token else "workspace_records"
+        with self.lock:
+            local = self.db.execute(f"""SELECT id,
+                json_extract(data,'$.lead.contact.email'), json_extract(data,'$.domain'),
+                json_extract(data,'$.website'), json_extract(data,'$.lead.business.business_domain'),
+                json_extract(data,'$.lead.business.business_website')
+                FROM {table} WHERE owner=? AND kind='lead'""", (identity.owner,)).fetchall()
+        fields = ("record_id", "email", "domain", "website", "company_domain", "company_website")
+        for row in local:
+            rows.setdefault(row[0], dict(zip(fields, row)))
+        return LeadIndex(rows.values())
+
+    def insert_lead(self, identity, value):
+        """Insert a canonical email-keyed lead without overwriting existing CRM data."""
+        value["updated_at"] = now()
+        with self.operation_lock(identity.owner):
+            if identity.token:
+                inserted = self._remote(identity, "POST", {"on_conflict": "owner_id,kind,record_id"}, {
+                    "owner_id": identity.owner, "kind": "lead", "record_id": value["id"],
+                    "data": value, "updated_at": value["updated_at"]}, insert_only=True)
+                if not inserted:
+                    return False
+            with self.lock, self.db:
+                cursor = self.db.execute("INSERT OR IGNORE INTO workspace_records VALUES (?,?,?,?)",
+                    (identity.owner, "lead", value["id"], json.dumps(value)))
+            return bool(identity.token) or cursor.rowcount == 1
 
     def save(self, identity, kind, value):
         assert kind in KINDS

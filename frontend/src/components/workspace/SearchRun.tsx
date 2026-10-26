@@ -19,6 +19,10 @@ export default function SearchRun({
   const [stopping, setStopping] = useState(false);
   const target = campaign.progress.target ?? campaign.plan.max_leads;
   const found = campaign.progress.verified;
+  // Old completed searches had no cap; old drafts use the new default on start.
+  const companyLimit = campaign.plan.max_leads_per_company === undefined
+    ? (campaign.status === "draft" ? 1 : null)
+    : campaign.plan.max_leads_per_company;
   const running = active(campaign);
   const locations = campaign.plan.locations?.length
     ? campaign.plan.locations
@@ -96,6 +100,12 @@ export default function SearchRun({
           .join(" · ") || "Supplied company websites"}
       </p>
       <p>{campaign.message}</p>
+      <p className="muted">
+        {companyLimit === null
+          ? "No per-company lead limit."
+          : `At most ${companyLimit} ${companyLimit === 1 ? "lead" : "leads"} per company, including saved leads.`}
+        {" "}Companies are matched by website domain. Duplicate emails are always skipped.
+      </p>
       {campaign.stop_reason && stopReasons[campaign.stop_reason] && (
         <p className="muted">{stopReasons[campaign.stop_reason]}</p>
       )}
@@ -165,7 +175,7 @@ export default function SearchRun({
             className="btn-secondary small"
             onClick={() =>
               suggest(
-                `Find ${campaign.shortfall} more leads for ${campaign.plan.niche}, continuing the search "${campaign.plan.name}" with the same SEO criteria and exclusions, in these cities: ${campaign.recommendations!.map((item) => item.city + ", " + item.state).join("; ")}.`,
+                `Find ${campaign.shortfall} more leads for ${campaign.plan.niche}, continuing the search "${campaign.plan.name}" with the same SEO criteria and exclusions, ${companyLimit === null ? "with no per-company lead limit" : `with at most ${companyLimit} leads per company including saved leads`}, excluding existing emails, in these cities: ${campaign.recommendations!.map((item) => item.city + ", " + item.state).join("; ")}.`,
               )
             }
           >

@@ -180,6 +180,26 @@ const campaign: Campaign = {
 };
 
 describe("Focused lead workspace", () => {
+  it("shows the company limit and preserves it when requesting more cities", () => {
+    const suggest = vi.fn();
+    render(<SearchRun campaign={{...campaign, plan: {...campaign.plan, max_leads_per_company: 2}}}
+      refresh={vi.fn()} viewLeads={vi.fn()} suggest={suggest} />);
+    expect(screen.getByText(/At most 2 leads per company, including saved leads/)).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate emails are always skipped/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name: /Use these cities/}));
+    expect(suggest).toHaveBeenCalledWith(expect.stringContaining("at most 2 leads per company including saved leads"));
+    expect(suggest).toHaveBeenCalledWith(expect.stringContaining("excluding existing emails"));
+  });
+  it("shows the one-lead default on older drafts", () => {
+    render(<SearchRun campaign={{...campaign, status: "draft"}}
+      refresh={vi.fn()} viewLeads={vi.fn()} suggest={vi.fn()} />);
+    expect(screen.getByText(/At most 1 lead per company, including saved leads/)).toBeInTheDocument();
+  });
+  it("shows an explicitly unlimited company cap", () => {
+    render(<SearchRun campaign={{...campaign, plan: {...campaign.plan, max_leads_per_company: null}}}
+      refresh={vi.fn()} viewLeads={vi.fn()} suggest={vi.fn()} />);
+    expect(screen.getByText(/No per-company lead limit/)).toBeInTheDocument();
+  });
   it("shows search depth, repeated city passes and the exact email policy", () => {
     render(<SearchRun campaign={{...campaign, status: "enriching",
       plan: {...campaign.plan, email_policy: "valid_only", max_city_rounds: 3},

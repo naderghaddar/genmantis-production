@@ -8,14 +8,16 @@ GenMantis has two screens: **Research Advisor** (the landing screen) and **Lead 
 
 The agent uses the business context from your conversation, asks for missing niche/geography when necessary, and starts a bounded background search when you explicitly ask to fetch leads. Planning-only requests produce drafts with an inline start button. There is no separate campaigns, dashboard, settings or pipeline screen.
 
-For Google Maps, Apify starts with **70 businesses per named city**. When a pass fills its source cap and supplies new domains, the worker can deepen that same city to 140, then 210 businesses (three passes by default; configurable from one to five). No new cities are added automatically. Hunter finds relevant named decision-makers; NeverBounce checks their emails. Multiple people can qualify at one company. Business counts do not count toward the lead target. The worker continues through the supplied cities and eligible deeper passes until the requested number of new people is reached or the cities/search budget are exhausted. It stops before another city, pass or email check once the target is met. Deeper Maps requests can repeat paid source results; repeated domains are never enriched twice within a run.
+For Google Maps, Apify starts with **70 businesses per named city**. When a pass fills its source cap and supplies new domains, the worker can deepen that same city to 140, then 210 businesses (three passes by default; configurable from one to five). No new cities are added automatically. Hunter finds relevant named decision-makers; NeverBounce checks their emails. New searches default to **one lead per company**. Ask for a higher per-company limit when needed. Business counts do not count toward the lead target. The worker continues through the supplied cities and eligible deeper passes until the requested number of new people is reached or the cities/search budget are exhausted. It stops before another city, pass or email check once the target is met. Deeper Maps requests can repeat paid source results; repeated domains are never enriched twice within a run.
+
+For example, “Find 200 dentist leads from 200 unique companies in Austin and Round Rock, Texas” sets `max_leads=200` and `max_leads_per_company=1`. “Up to 3 leads per company” sets the company limit to 3; an explicitly unlimited request sets it to `null`. Company limits include existing saved leads and match companies by normalized website domain, including branches and subdomains. Companies using unrelated domains cannot automatically be identified as the same organization. Search cards display the limit and retain it in continuation requests.
 
 A lead uses this workspace's policy:
 
 - A named person with an email from Hunter.
 - NeverBounce returned **valid**, **catchall**, or **unknown**.
 - Generic inboxes, invalid/disposable addresses, missing results and verification errors do not count.
-- Emails are deduplicated case-insensitively across businesses, locations and existing leads. Previously saved people do not count again as new leads.
+- Emails are trimmed and deduplicated case-insensitively across businesses, locations and **all** existing leads, including archived, excluded and older records. Duplicate filtering is always on. Previously saved people do not count again as new leads or overwrite CRM notes. A compact owner-scoped index is loaded once per search, then email and company checks use constant-time lookups.
 
 The exact NeverBounce status is shown in the database and exports. Catch-all and unknown are accepted under this product policy; they are not claims of confirmed deliverability.
 

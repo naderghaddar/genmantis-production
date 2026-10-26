@@ -17,7 +17,7 @@ from app.services.business_service import deduplicate_businesses, unique_compani
 from app.services.domain_service import extract_domain
 from app.services.enrichment_pipeline import VerificationCache
 from app.services.contact_selector import rank_candidates
-from app.services.lead_policy import ACCEPTED_RESULTS, is_person, verified_contact
+from app.services.lead_policy import ACCEPTED_RESULTS, is_person
 from app.services.hunter_service import HunterService
 from app.services.neverbounce_service import NeverBounceService
 from app.services.provider_http import ProviderHTTP
@@ -76,6 +76,7 @@ class CampaignService:
             # Preserve the verification policy of drafts created before per-search policies.
             campaign["plan"].setdefault("email_policy", "accepted")
             campaign["plan"].setdefault("max_city_rounds", 1)
+            campaign["plan"].setdefault("max_leads_per_company", 1)
             plan = CampaignPlan.model_validate(campaign["plan"])
             required = [("Hunter", self.settings.hunter_key), ("NeverBounce", self.settings.neverbounce_key)]
             if plan.source == "google_maps":
@@ -169,9 +170,10 @@ class CampaignService:
         consecutive_check_errors = 0
         consecutive_hunter_errors = 0
         try:
-            # A new request counts new people, never duplicates already in the lead database.
-            seen_emails = {item["lead"]["contact"]["email"].strip().casefold()
-                for item in self.store.list(identity, "lead") if verified_contact(item)}
+            # Include every saved email, even archived/excluded/legacy records and
+            # pending recovery writes. Load compact keys once before paid work.
+            lead_index = self.store.lead_index(identity)
+            seen_emails = set(lead_index.emails)
             try:
                 profile = self.store.get(identity, "profile", "business").get("profile", {})
             except HTTPException as error:
@@ -227,6 +229,10 @@ class CampaignService:
                             continue
                         seen_domains.add(domain)
                         local["new_domains"] += 1
+                        if lead_index.at_company_limit(domain, plan.max_leads_per_company):
+                            progress["reused"] += 1
+                            self._save(identity, campaign)
+                            continue
                         base = Lead(business=business, run_id=campaign["id"])
                         if plan.source == "google_maps":
                             request = ScrapeRequest(niche=plan.niche, city=local_plan.city, state=local_plan.state,
@@ -274,12 +280,12 @@ class CampaignService:
                                 campaign["warnings"].append(warning)
                         if not candidates:
                             progress["no_contact"] += 1
-                        # Hunter's configured result/page limits bound this list. Check all suitable people,
-                        # rather than stopping at the first person or counting a company inbox.
+                        # Rejected/duplicate candidates do not consume a company slot.
+                        # Stop before spending on checks beyond the requested cap.
                         for contact, kind in candidates:
                             if cancel.is_set():
                                 raise InterruptedError
-                            if progress["verified"] >= plan.max_leads:
+                            if progress["verified"] >= plan.max_leads or lead_index.at_company_limit(domain, plan.max_leads_per_company):
                                 break
                             email = contact.email.strip().casefold()
                             if email in seen_emails:
@@ -316,10 +322,14 @@ class CampaignService:
                                 "assessment": assessment, "lead": lead.model_dump(mode="json"), "created_at": now(),
                                 "activities": [{"at": now(), "message": "Found by " + plan.name}]}
                             try:
-                                self.store.save(identity, "lead", record)
+                                inserted = self.store.insert_lead(identity, record)
                             except HTTPException:
                                 self.store.recovery_save(identity, "lead", record)
                                 raise
+                            lead_index.add(email, domain)
+                            if not inserted:
+                                progress["reused"] += 1
+                                continue
                             progress["verified"] += 1
                             local["leads"] += 1
                             campaign["lead_ids"].append(record_id)
@@ -355,6 +365,8 @@ class CampaignService:
             else:
                 policy = "valid" if plan.email_policy == "valid_only" else "valid, catchall or unknown"
                 message = f"Found all {plan.max_leads} requested leads. Each is a unique person with a Hunter email checked by NeverBounce as {policy}."
+                if plan.max_leads_per_company is not None:
+                    message += f" At most {plan.max_leads_per_company} saved lead(s) per company domain, including existing leads."
                 campaign["stop_reason"] = "target_reached"
                 status = "completed"
             campaign["completed_at"] = now()
