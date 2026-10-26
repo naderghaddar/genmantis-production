@@ -3,6 +3,8 @@ from typing import Any
 
 from app.models.leads import Contact
 from app.services.contact_selector import rank_candidates
+from app.services.lead_policy import is_person
+from app.services.lead_diagnostics import emit
 from app.services.provider_http import ProviderError, ProviderHTTP
 
 
@@ -40,6 +42,10 @@ class HunterService:
     def __init__(self, http: ProviderHTTP, key: str, max_results: int = 10, max_pages: int = 1):
         self.http, self.key = http, key
         self.max_results, self.max_pages = max_results, max_pages
+        self.diagnostic = None
+
+    def _diagnose(self, event, **fields):
+        (self.diagnostic or emit)(event, **fields)
 
     def search(self, domain: str) -> HunterSearch:
         # Hunter documents job_titles, decision_maker, seniority and type filters.
@@ -50,10 +56,19 @@ class HunterService:
             {"type": "personal", "decision_maker": "true"},
             {"type": "generic"},
         ]
-        for query in filters:
+        for filter_index, query in enumerate(filters, start=1):
             found = self._search(domain, query)
             found.metadata["filters"] = query
-            if rank_candidates(found.contacts) or (found.reason and found.reason != "hunter_search_limit_reached"):
+            ranked = rank_candidates(found.contacts)
+            stop = bool(ranked) or bool(found.reason and found.reason != "hunter_search_limit_reached")
+            self._diagnose("hunter_filter_result", domain=domain, filter_index=filter_index,
+                filters=query, parsed_contacts=len(found.contacts), ranked_contacts=len(ranked),
+                eligible_people=sum(kind == "decision_maker" and is_person(contact) for contact, kind in ranked),
+                reason=found.reason, pages_fetched=found.metadata.get("pages_fetched", 0),
+                max_results=self.max_results, max_pages=self.max_pages,
+                decision="stop_ranked_contacts" if ranked else "stop_provider_reason" if stop else "filters_exhausted" if filter_index == len(filters) else "broaden",
+                remaining_filters=len(filters) - filter_index)
+            if stop:
                 return found
         return found
 
@@ -74,10 +89,12 @@ class HunterService:
                 if error.reason == "hunter_privacy_suppressed":
                     found.contacts.clear()
                 found.reason = error.reason
+                self._diagnose("hunter_page_error", domain=domain, filters=filters, offset=offset, reason=error.reason)
                 return found
             data = payload.get("data")
             if not isinstance(data, dict) or not isinstance(data.get("emails"), list):
                 found.reason = "hunter_invalid_response"
+                self._diagnose("hunter_page_error", domain=domain, filters=filters, offset=offset, reason=found.reason)
                 return found
             meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
             found.metadata = {"organization": data.get("organization"), "domain": data.get("domain"),
@@ -90,6 +107,10 @@ class HunterService:
             offset += len(items)
             total = meta.get("results")
             more = bool(items) and (offset < total if isinstance(total, int) else len(items) == limit)
+            self._diagnose("hunter_page_result", domain=domain, filters=filters, page=page + 1,
+                requested_limit=limit, returned_records=len(items), parsed_unique_contacts=len(found.contacts),
+                provider_total=total if isinstance(total, int) else None, more_available=more,
+                truncated=more and (offset >= self.max_results or page + 1 >= self.max_pages))
             if not more:
                 break
             if offset >= self.max_results or page + 1 >= self.max_pages:
