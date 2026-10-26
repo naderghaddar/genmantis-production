@@ -12,12 +12,13 @@ from fastapi import HTTPException
 from app.models.leads import Lead
 from app.models.schemas import ScrapeRequest
 from app.models.workspace import CampaignPlan, now, new_id
-from app.services.apify_service import ApifyService
+from app.services.apify_service import ApifyService, PLACES_PER_PASS, build_actor_input
 from app.services.business_service import deduplicate_businesses, unique_companies
 from app.services.domain_service import extract_domain
 from app.services.enrichment_pipeline import VerificationCache
 from app.services.contact_selector import rank_candidates, is_generic, decision_tier
 from app.services.lead_diagnostics import emit
+from app.services.company_qualification import matches_niche, official_domain_basis, contact_matches_domain, words
 from app.services.lead_policy import ACCEPTED_RESULTS, is_person
 from app.services.hunter_service import HunterService
 from app.services.neverbounce_service import NeverBounceService
@@ -154,6 +155,9 @@ class CampaignService:
         import time
         apify = ApifyService(ApifyClient(self.settings.apify_token, max_retries=0, timeout_secs=30))
         request = ScrapeRequest(niche=plan.niche, city=plan.city, state=plan.state, max_leads=30)
+        payload = build_actor_input(request)
+        payload["maxCrawledPlacesPerSearch"] = campaign["locations"][-1]["business_limit"]
+        self._diagnose(campaign, "apify_request", actor_input=payload)
         scrape = apify.start(request, business_limit=campaign["locations"][-1]["business_limit"])
         campaign["apify_run_id"] = scrape.run_id
         campaign.setdefault("apify_run_ids", []).append(scrape.run_id)
@@ -162,6 +166,11 @@ class CampaignService:
         deadline = time.monotonic() + self.settings.apify_wait_timeout
         while scrape.status == "running":
             if cancel.wait(self.settings.apify_poll_interval):
+                try:
+                    apify.abort(scrape.run_id)
+                    self._diagnose(campaign, "apify_abort_requested", run_id=scrape.run_id)
+                except Exception as error:
+                    self._diagnose(campaign, "apify_abort_failed", run_id=scrape.run_id, exception_type=type(error).__name__)
                 raise InterruptedError
             if time.monotonic() > deadline:
                 raise RuntimeError("Source wait timed out. Check Apify Console before starting another campaign.")
@@ -213,7 +222,7 @@ class CampaignService:
                         break
                     local_plan = plan.model_copy(update={"city": location.city, "state": location.state, "locations": [location]}) if location else plan
                     local = {"city": local_plan.city, "state": local_plan.state, "status": "discovering", "discovered": 0, "processed": 0, "leads": 0,
-                        "round": round_number, "business_limit": 70 * round_number, "source_count": 0, "new_domains": 0}
+                        "round": round_number, "business_limit": PLACES_PER_PASS * round_number, "source_count": 0, "new_domains": 0}
                     campaign["locations"].append(local)
                     label = ", ".join(filter(None, [local_plan.city, local_plan.state])) or "the supplied websites"
                     self._save(identity, campaign, "discovering", f"Searching up to {local['business_limit']} businesses in {label} (pass {round_number}). {progress['verified']}/{plan.max_leads} leads found.")
@@ -262,6 +271,16 @@ class CampaignService:
                             continue
                         base = Lead(business=business, run_id=campaign["id"])
                         if plan.source == "google_maps":
+                            if not matches_niche(business, plan.niche):
+                                progress["excluded"] += 1
+                                self._diagnose(campaign, "company_niche_excluded", **context, reason="category_does_not_establish_requested_niche")
+                                self._save(identity, campaign)
+                                continue
+                            if business.business_city and words(business.business_city) != words(local_plan.city):
+                                progress["excluded"] += 1
+                                self._diagnose(campaign, "company_location_excluded", **context, reason="listed_city_outside_requested_city")
+                                self._save(identity, campaign)
+                                continue
                             request = ScrapeRequest(niche=plan.niche, city=local_plan.city, state=local_plan.state,
                                 min_google_maps_rank=plan.min_google_maps_rank, max_google_maps_rank=plan.max_google_maps_rank)
                             if not qualify(base, request):
@@ -308,6 +327,29 @@ class CampaignService:
                             campaign["stop_reason"] = "contact_provider_unavailable"
                             raise RuntimeError("Contact provider repeatedly failed")
                         candidates = [(person, kind) for person, kind in rank_candidates(search.contacts) if kind == "decision_maker" and is_person(person)]
+                        provider_domain = search.metadata.get("domain")
+                        website_basis = "user_supplied_company_website" if plan.source == "company_websites" else official_domain_basis(
+                            business, domain, search.metadata.get("organization"))
+                        if provider_domain and extract_domain(provider_domain)[1] != domain:
+                            website_basis = None
+                        if not website_basis:
+                            progress["review"] += 1
+                            self._diagnose(campaign, "company_identity_unconfirmed", **context, reason="official_company_domain_not_established")
+                            warning = "Companies whose website identity could not be established were held for review and did not count toward the target."
+                            if warning not in campaign["warnings"]:
+                                campaign["warnings"].append(warning)
+                            self._save(identity, campaign)
+                            continue
+                        affiliated = []
+                        for person, kind in candidates:
+                            if contact_matches_domain(person, domain):
+                                affiliated.append((person, kind))
+                            else:
+                                self._diagnose(campaign, "candidate_domain_mismatch", **context, reason="contact_email_outside_company_domain")
+                        candidates = affiliated
+                        base.company_validation = {"version": 1, "website_basis": website_basis,
+                            "company_domain": domain, "niche_basis": "maps_categories" if plan.source == "google_maps" else "supplied_or_researched_company",
+                            "contact_affiliation": "email_matches_company_domain", "branch_affiliation": "not_established"}
                         self._diagnose(campaign, "company_contacts", **context,
                             returned_contacts=len(search.contacts), eligible_candidates=len(candidates),
                             generic_contacts=sum(is_generic(person) for person in search.contacts),
@@ -359,7 +401,7 @@ class CampaignService:
                             lead.contact, lead.contact_type, lead.verification = contact, kind, verification
                             lead.verified, lead.enrichment_status = True, "verified"
                             lead.hunter_search_reason, lead.hunter_metadata = search.reason, search.metadata
-                            lead.contact_scope = "company_domain; local branch affiliation not established"
+                            lead.contact_scope = "email matches company domain with identity evidence; local branch affiliation not established"
                             lead.enrichment_timestamp = datetime.fromisoformat(now())
                             lead.verification_attempts = [{"email": contact.email, "contact_type": kind, **verification.model_dump()}]
                             record_id = hashlib.sha256(email.encode()).hexdigest()[:32]

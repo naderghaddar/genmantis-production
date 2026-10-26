@@ -120,13 +120,19 @@ export default function SearchRun({
       )}
       {(campaign.status === "draft" || running) && (
         <p className="muted">
-          Starts with 70 businesses per city, with up to {campaign.plan.max_city_rounds ?? 1} passes
+          Starts with 100 businesses per city, with up to {campaign.plan.max_city_rounds ?? 1} passes
           in these cities only. Stops at {target} new people or when the available
           results or search budget are exhausted.
         </p>
       )}
       {!!campaign.progress.review && (
-        <p className="muted">{campaign.progress.review} businesses had insufficient evidence for your criteria and did not count toward the target.</p>
+        <p className="muted">{campaign.progress.review} businesses had insufficient qualification or website identity evidence and did not count toward the target.</p>
+      )}
+      {!!campaign.diagnostics?.counts.company_niche_excluded && (
+        <p className="muted">{campaign.diagnostics.counts.company_niche_excluded} businesses did not match the requested niche and were excluded.</p>
+      )}
+      {!!campaign.diagnostics?.counts.company_location_excluded && (
+        <p className="muted">{campaign.diagnostics.counts.company_location_excluded} businesses were listed outside the requested city and were excluded.</p>
       )}
       {!!campaign.locations?.length && (
         <details className="search-breakdown">

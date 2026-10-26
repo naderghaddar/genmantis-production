@@ -26,7 +26,7 @@ def setup():
     sdk.dataset.return_value.get.return_value = {"itemCount": 2}
     sdk.dataset.return_value.iterate_items.return_value = iter([{"title": "Clinic"}, {"title": "Another"}])
     sdk.key_value_store.return_value.get_record.return_value = {"value": {
-        "searchStringsArray": ["Chiropractors"], "locationQuery": "Austin, Texas",
+        "searchStringsArray": ["Chiropractors"], "locationQuery": "Austin, Texas", "categoryFilterWords": ["chiropractor"],
     }}
     app.dependency_overrides[get_apify_service] = lambda: ApifyService(sdk)
     app.dependency_overrides[browser_owner] = lambda: "test-owner"
@@ -57,9 +57,9 @@ def test_exact_input_and_start(setup):
     assert response.json()["status"] == "running"
     sdk.actor.assert_called_once_with(ACTOR_ID)
     expected = {
-        "searchStringsArray": ["Chiropractors"], "locationQuery": "Austin, Texas",
+        "searchStringsArray": ["Chiropractors"], "locationQuery": "Austin, Texas", "categoryFilterWords": ["chiropractor"],
         "enableCompetitorAnalysis": False, "includeWebResults": False,
-        "maxCompetitorsToAnalyze": 30, "maxCrawledPlacesPerSearch": 70,
+        "maxCompetitorsToAnalyze": 30, "maxCrawledPlacesPerSearch": 100,
         "maximumLeadsEnrichmentRecords": 0, "scrapeContacts": False,
         "scrapeDirectories": False, "scrapeImageAuthors": False,
         "scrapeOrderOnline": False, "scrapePlaceDetailPage": False,

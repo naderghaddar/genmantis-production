@@ -64,6 +64,7 @@ class Lead(BaseModel):
     hunter_metadata: dict[str, Any] = Field(default_factory=dict)
     verification_attempts: list[dict[str, Any]] = Field(default_factory=list)
     contact_scope: str | None = None
+    company_validation: dict[str, Any] = Field(default_factory=dict)
     shared_domain: bool = False
     run_id: str
     enrichment_timestamp: datetime | None = None

@@ -180,6 +180,61 @@ const campaign: Campaign = {
 };
 
 describe("Focused lead workspace", () => {
+  it.each(["New conversation", "New research conversation", "mobile selector"])(
+    "%s creates a fresh conversation and sends the next message to it", async (control) => {
+      const oldThread = {
+        id: "old-thread", title: "Previous research", status: "idle", campaign_ids: [],
+        usage: { requests: 0, input_tokens: 0, output_tokens: 0 },
+        messages: [{ id: "old-message", role: "assistant", content: "Previous conversation reply", at: "2026-10-26" }],
+      };
+      const freshThread = { ...oldThread, id: "fresh-thread", title: "New research", messages: [] };
+      const refresh = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(api).mockImplementation(async (path) => path === "/threads/old-thread" ? oldThread : freshThread);
+      render(<Advisor workspace={{ ...workspace,
+        threads: [{ id: oldThread.id, title: oldThread.title, updated_at: "2026-10-26", status: "idle" }],
+        campaigns: [{ ...campaign, thread_id: oldThread.id, status: "enriching" }],
+      }} refresh={refresh} review={vi.fn()} />);
+      fireEvent.click(screen.getByRole("button", { name: "Previous research" }));
+      expect(await screen.findByText("Previous conversation reply")).toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText("Message research advisor"), { target: { value: "Unsent old draft" } });
+      if (control === "mobile selector") {
+        fireEvent.change(screen.getByLabelText("Research conversation"), { target: { value: "" } });
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: control }));
+      }
+      await waitFor(() => expect(api).toHaveBeenCalledWith("/threads", "POST"));
+      await waitFor(() => expect(screen.getByLabelText("Research conversation")).toHaveValue("fresh-thread"));
+      expect(screen.getByLabelText("Message research advisor")).toHaveValue("");
+      expect(screen.getByLabelText("Message research advisor")).toHaveFocus();
+      expect(screen.queryByText("Previous conversation reply")).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: campaign.plan.name })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "New research" })).toHaveClass("selected");
+      expect(refresh).toHaveBeenCalledOnce();
+      fireEvent.change(screen.getByLabelText("Message research advisor"), { target: { value: "New request" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(api).toHaveBeenCalledWith("/threads/fresh-thread/messages", "POST",
+        expect.objectContaining({ message: "New request" })));
+      expect(vi.mocked(api).mock.calls.filter(([path]) => path === "/threads")).toHaveLength(1);
+    },
+  );
+
+  it("keeps the current conversation and draft when creating a conversation fails", async () => {
+    const thread = { id: "old-thread", title: "Previous research", messages: [], campaign_ids: [], status: "idle",
+      usage: { requests: 0, input_tokens: 0, output_tokens: 0 } };
+    vi.mocked(api).mockResolvedValueOnce(thread).mockRejectedValueOnce(new Error("Unable to create conversation"));
+    render(<Advisor workspace={{ ...workspace,
+      threads: [{ id: thread.id, title: thread.title, updated_at: "2026-10-26", status: "idle" }],
+    }} refresh={vi.fn()} review={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Previous research" }));
+    await waitFor(() => expect(screen.getByLabelText("Research conversation")).toHaveValue(thread.id));
+    fireEvent.change(screen.getByLabelText("Message research advisor"), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to create conversation");
+    expect(screen.getByLabelText("Research conversation")).toHaveValue(thread.id);
+    expect(screen.getByLabelText("Message research advisor")).toHaveValue("Keep this draft");
+    expect(screen.getByRole("button", { name: "New conversation" })).toBeEnabled();
+  });
+
   it("shows the company limit and preserves it when requesting more cities", () => {
     const suggest = vi.fn();
     render(<SearchRun campaign={{...campaign, plan: {...campaign.plan, max_leads_per_company: 2}}}

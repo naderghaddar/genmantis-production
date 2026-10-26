@@ -51,7 +51,7 @@ class CampaignPlan(Strict):
     query: str = Field(default="", max_length=1000)
     websites: list[str] = Field(default_factory=list, max_length=70)
     max_leads: int = Field(default=50, ge=1, le=1000, strict=True,
-        description="Requested number of NEW unique people with Hunter emails checked by NeverBounce as valid, catchall or unknown. This is NOT a business/scrape limit. Google Maps starts with 70 businesses per location and can deepen within those cities.")
+        description="Requested number of NEW unique people with Hunter emails checked by NeverBounce as valid, catchall or unknown. This is NOT a business/scrape limit. Google Maps starts with 100 businesses per location and can deepen within those cities.")
     max_leads_per_company: int | None = Field(default=1, ge=1, le=1000, strict=True,
         description="Maximum saved leads per company domain, including existing workspace leads. Default 1. For '200 leads from 200 unique companies' set max_leads=200 and this field=1. Use a higher number when requested, or null only for explicitly unlimited contacts per company. Duplicate emails are always excluded.")
     rationale: str = Field(default="", max_length=3000)
@@ -66,7 +66,7 @@ class CampaignPlan(Strict):
     email_policy: Literal["valid_only", "accepted"] = Field(default="accepted",
         description="accepted counts valid/catchall/unknown, the workspace default. Use valid_only only when requested.")
     max_city_rounds: int = Field(default=3, ge=1, le=5, strict=True,
-        description="Search depth per explicitly named city: up to 70, 140, then 210 businesses. Deepen only if the prior batch filled its cap and supplied new businesses. Default 3; never add cities.")
+        description="Search depth per explicitly named city: up to 100, 200, then 300 businesses. Deepen only if the prior batch filled its cap and supplied new businesses. Default 3; never add cities.")
 
     @model_validator(mode="after")
     def valid_source(self):

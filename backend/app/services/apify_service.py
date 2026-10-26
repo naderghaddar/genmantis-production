@@ -7,12 +7,15 @@ from fastapi import HTTPException
 from app.config import ACTOR_ID, get_api_token
 from app.models.schemas import ScrapeRequest, ScrapeStatus
 from app.services.csv_service import csv_filename
+from app.services.company_qualification import maps_categories
+
+PLACES_PER_PASS = 100
 
 FIXED_SETTINGS = {
     "enableCompetitorAnalysis": False,
     "includeWebResults": False,
     "maxCompetitorsToAnalyze": 30,
-    "maxCrawledPlacesPerSearch": 70,
+    "maxCrawledPlacesPerSearch": PLACES_PER_PASS,
     "maximumLeadsEnrichmentRecords": 0,
     "scrapeContacts": False,
     "scrapeDirectories": False,
@@ -31,17 +34,21 @@ FIXED_SETTINGS = {
 
 
 def build_actor_input(request: ScrapeRequest) -> dict[str, Any]:
-    return {**deepcopy(FIXED_SETTINGS), "searchStringsArray": [request.niche],
-            "locationQuery": f"{request.city}, {request.state}"}
+    actor_input = {**deepcopy(FIXED_SETTINGS), "searchStringsArray": [request.niche],
+                   "locationQuery": f"{request.city}, {request.state}"}
+    categories = maps_categories(request.niche)
+    if categories:
+        actor_input["categoryFilterWords"] = categories
+    return actor_input
 
 
 class ApifyService:
     def __init__(self, client: ApifyClient) -> None:
         self.client = client
 
-    def start(self, request: ScrapeRequest, *, business_limit: int = 70) -> ScrapeStatus:
-        if type(business_limit) is not int or not 70 <= business_limit <= 350:
-            raise ValueError("Business limit must be between 70 and 350.")
+    def start(self, request: ScrapeRequest, *, business_limit: int = PLACES_PER_PASS) -> ScrapeStatus:
+        if type(business_limit) is not int or not PLACES_PER_PASS <= business_limit <= PLACES_PER_PASS * 5:
+            raise ValueError("Business limit must be between 100 and 500.")
         actor_input = build_actor_input(request)
         actor_input["maxCrawledPlacesPerSearch"] = business_limit
         run = self.client.actor(ACTOR_ID).start(run_input=actor_input)
@@ -55,6 +62,11 @@ class ApifyService:
 
     def status(self, run_id: str) -> ScrapeStatus:
         return self._status(self.get_run(run_id))
+
+    def abort(self, run_id: str):
+        run = self.get_run(run_id)
+        if run["status"] in {"READY", "RUNNING", "TIMING-OUT"}:
+            self.client.run(run_id).abort()
 
     def _status(self, run: dict[str, Any]) -> ScrapeStatus:
         status = run["status"]

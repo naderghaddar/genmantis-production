@@ -20,7 +20,7 @@ def events(caplog):
 
 
 def place(name, website=None, rank=20):
-    return {"title": name, "website": website, "rank": rank, "searchString": "clinics",
+    return {"categoryName": "Clinic", "title": name, "website": website, "rank": rank, "searchString": "clinics",
             "searchPageUrl": "https://www.google.com/maps/search/clinics", "isAdvertisement": False}
 
 
@@ -140,7 +140,7 @@ def test_300_company_yield_depends_on_real_provider_fields(settings, monkeypatch
         verifier = MagicMock()
         verifier.verify.return_value = Verification(result="valid")
         monkeypatch.setattr("app.services.campaign_service.NeverBounceService", lambda *args: verifier)
-        service._discover = lambda local, *args: [place(str(i), f"https://clinic{i}.com")
+        service._discover = lambda local, *args: [place(f"Clinic {i}", f"https://clinic{i}.com")
             for i in range(int(local.city) * 60, (int(local.city) + 1) * 60)]
         campaign = service.create(user, CampaignPlan(name="300 company comparison", source="google_maps",
             niche="clinics", locations=[{"city": str(i), "state": "Test"} for i in range(5)],

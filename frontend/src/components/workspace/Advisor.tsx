@@ -16,7 +16,6 @@ import {
   type Campaign,
   type Thread,
   type Workspace,
-  active,
 } from "../../services/workspaceApi";
 import { Mark, Spinner } from "./Shared";
 import SearchRun from "./SearchRun";
@@ -56,6 +55,7 @@ export default function Advisor({
   const [pending, setPending] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
+  const scroll = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const pendingId = useRef<{ text: string; id: string } | null>(null);
   const mounted = useRef(true);
@@ -66,8 +66,31 @@ export default function Advisor({
     };
   }, []);
   useEffect(() => {
-    bottom.current?.scrollIntoView?.({ behavior: "smooth", block: "end" });
-  }, [thread?.messages.length, pending]);
+    if (!thread?.messages.length && !pending) scroll.current?.scrollTo?.({ top: 0 });
+    else bottom.current?.scrollIntoView?.({ behavior: "smooth", block: "end" });
+  }, [thread?.id, thread?.messages.length, pending]);
+  async function newConversation() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await api<Thread>("/threads", "POST");
+      if (!mounted.current) return;
+      setThread(next);
+      setMessage("");
+      setPending("");
+      pendingId.current = null;
+      setShowHistory(false);
+      await refresh();
+    } catch (err) {
+      if (mounted.current) setError((err as Error).message);
+    } finally {
+      if (mounted.current) {
+        setBusy(false);
+        input.current?.focus();
+      }
+    }
+  }
   async function select(id: string) {
     if (busy) return;
     setBusy(true);
@@ -123,8 +146,11 @@ export default function Advisor({
   const unattached = workspace.campaigns.filter(
     (campaign) =>
       !attachedIds.has(campaign.id) &&
-      (active(campaign) || (thread ? campaign.thread_id === thread.id : true)),
+      (!thread || campaign.thread_id === thread.id),
   );
+  const threads = thread && !workspace.threads.some((item) => item.id === thread.id)
+    ? [{ id: thread.id, title: thread.title }, ...workspace.threads]
+    : workspace.threads;
   return (
     <div className="advisor-layout">
       <aside className="research-history">
@@ -134,11 +160,7 @@ export default function Advisor({
             className="icon-button"
             aria-label="New research conversation"
             disabled={busy}
-            onClick={() => {
-              setThread(null);
-              setMessage("");
-              setError("");
-            }}
+            onClick={() => void newConversation()}
           >
             <Plus size={17} />
           </button>
@@ -146,15 +168,12 @@ export default function Advisor({
         <button
           className="new-research"
           disabled={busy}
-          onClick={() => {
-            setThread(null);
-            setError("");
-          }}
+          onClick={() => void newConversation()}
         >
           <Plus size={15} /> New conversation
         </button>
-        {workspace.threads.length ? (
-          workspace.threads.map((item) => (
+        {threads.length ? (
+          threads.map((item) => (
             <button
               key={item.id}
               disabled={busy}
@@ -196,15 +215,11 @@ export default function Advisor({
             disabled={busy}
             onChange={(event) => {
               if (event.target.value) void select(event.target.value);
-              else {
-                setThread(null);
-                setMessage("");
-                setError("");
-              }
+              else void newConversation();
             }}
           >
             <option value="">New conversation</option>
-            {workspace.threads.map((item) => (
+            {threads.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.title}
               </option>
@@ -212,7 +227,7 @@ export default function Advisor({
           </select>
           <span className="subtle">SEO research → people → leads</span>
         </div>
-        <div className="advisor-scroll" aria-live="polite">
+        <div ref={scroll} className="advisor-scroll" aria-live="polite">
           {!thread?.messages.length && !pending && (
             <div className="advisor-welcome">
               <div className="welcome-symbol">

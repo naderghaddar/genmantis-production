@@ -21,6 +21,11 @@ and exception messages. Company domains and campaign IDs are included.
 | Event | What to inspect |
 | --- | --- |
 | `campaign_started` | Actual policies, existing-email count, provider pagination limits and research budget |
+| `apify_request` | Exact actor JSON, including cap, geography and category filters |
+| `company_niche_excluded` / `company_location_excluded` | Category evidence or listed city failed targeting |
+| `company_identity_unconfirmed` | Company name/domain/provider organization could not establish website identity |
+| `candidate_domain_mismatch` | Contact email is outside the company domain |
+| `apify_abort_requested` / `apify_abort_failed` | Cancellation requested an actor abort or the abort call failed |
 | `discovery_batch` | Source records versus unique places versus unique companies |
 | `company_no_domain` | `no_website`, `invalid_website`, or `excluded_domain` |
 | `company_repeated_domain` | Company was already encountered in this campaign |

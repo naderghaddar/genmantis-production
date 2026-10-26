@@ -62,6 +62,7 @@ export interface Campaign {
   shortfall?: number;
   policy_version?: string;
   stop_reason?: string;
+  diagnostics?: { version: number; counts: Record<string, number>; reasons?: Record<string, Record<string, number>> };
   locations?: {
     city: string;
     state: string;

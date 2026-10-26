@@ -10,6 +10,9 @@ EXCLUDED_DOMAINS = {
     "tiktok.com", "youtube.com", "youtu.be", "yelp.com", "yelp.ca", "yelp.co.uk", "google.com", "google.ca",
     "google.co.uk", "goo.gl", "g.page", "maps.app.goo.gl", "yellowpages.com",
     "yellowpages.ca", "mapquest.com", "tripadvisor.com", "foursquare.com", "linktr.ee",
+    "healthline.com", "healthgrades.com", "zocdoc.com", "vitals.com", "webmd.com",
+    "doximity.com", "ratemds.com", "doctoralia.com", "practo.com", "opencare.com",
+    "psychologytoday.com", "massagebook.com", "chamberofcommerce.com", "bbb.org",
 }
 
 
