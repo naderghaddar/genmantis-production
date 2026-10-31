@@ -5,42 +5,39 @@ import tldextract
 
 # Use the bundled public suffix snapshot: no uncontrolled network fetch at startup.
 EXTRACT = tldextract.TLDExtract(suffix_list_urls=(), include_psl_private_domains=True)
-EXCLUDED_DOMAINS = {
-    "facebook.com", "fb.com", "instagram.com", "linkedin.com", "twitter.com", "x.com",
-    "tiktok.com", "youtube.com", "youtu.be", "yelp.com", "yelp.ca", "yelp.co.uk", "google.com", "google.ca",
-    "google.co.uk", "goo.gl", "g.page", "maps.app.goo.gl", "yellowpages.com",
-    "yellowpages.ca", "mapquest.com", "tripadvisor.com", "foursquare.com", "linktr.ee",
-    "healthline.com", "healthgrades.com", "zocdoc.com", "vitals.com", "webmd.com",
-    "doximity.com", "ratemds.com", "doctoralia.com", "practo.com", "opencare.com",
-    "psychologytoday.com", "massagebook.com", "chamberofcommerce.com", "bbb.org",
-}
 
 
 def extract_domain(website: str | None) -> tuple[str | None, str | None, str | None]:
-    """Return normalized URL, registrable domain, or an explicit skip reason."""
+    """Skip only blank websites; retain every other value for downstream processing.
+
+    Prefer a registrable domain, then the hostname (including IPs and unknown
+    suffixes), then the original nonblank value if parsing is impossible.
+    """
     if not website or not website.strip():
         return None, None, "no_website"
     website = website.strip()
     try:
-        url = urlsplit(website if "://" in website or website.startswith("//") else "https://" + website)
-        if url.scheme not in {"", "http", "https"} or not url.hostname or url.username or url.password:
-            return None, None, "invalid_website"
-        _ = url.port  # Validate malformed ports even though company searches do not use ports.
-        host = url.hostname.rstrip(".").encode("idna").decode("ascii").lower()
-        if any(char.isspace() for char in host):
-            return None, None, "invalid_website"
+        # A bare IPv6 address needs brackets before URL parsing.
         try:
-            ipaddress.ip_address(host)
-            return None, None, "invalid_website"
+            address = ipaddress.ip_address(website)
         except ValueError:
-            pass
-        parts = EXTRACT(host)
-        domain = parts.top_domain_under_public_suffix
-        if not domain:
-            return None, None, "invalid_website"
-        normalized = urlunsplit((url.scheme or "https", host, url.path, url.query, ""))
-        if domain in EXCLUDED_DOMAINS or (parts.domain == "google" and parts.suffix):
-            return normalized, None, "excluded_domain"
-        return normalized, domain, None
+            address = None
+        if address:
+            host = str(address)
+            netloc = f"[{host}]" if address.version == 6 else host
+            return "https://" + netloc, host, None
+        url = urlsplit(website if "://" in website or website.startswith("//") else "https://" + website)
+        if url.hostname:
+            host = url.hostname.rstrip(".")
+            if host:
+                try:
+                    host = host.encode("idna").decode("ascii").lower()
+                except UnicodeError:
+                    host = host.casefold()
+                domain = EXTRACT(host).top_domain_under_public_suffix or host
+                netloc = f"[{host}]" if ":" in host else host
+                normalized = urlunsplit((url.scheme or "https", netloc, url.path, url.query, ""))
+                return normalized, domain, None
     except (ValueError, UnicodeError):
-        return None, None, "invalid_website"
+        pass
+    return website, website.casefold(), "website_domain_unparsed"

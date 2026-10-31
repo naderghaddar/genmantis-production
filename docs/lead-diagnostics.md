@@ -17,7 +17,7 @@ The current workflow is implemented by `CampaignService` and identified by `work
 - `verified`: new accepted contacts saved, including valid, catchall and unknown results.
 - `reused`: existing emails skipped, or insertion conflicts.
 - `excluded`: source results excluded by rank requirements.
-- `no_contact`: source results without a usable domain plus domains without an eligible non-generic email. This mixes units and is not a single conversion funnel.
+- `no_contact`: source results with blank website fields plus domains without an eligible non-generic email. This mixes units and is not a single conversion funnel.
 - `rejected`: email checks whose outcome was not accepted.
 - `verification_errors`: checks that failed; these are never counted as NeverBounce unknown results.
 
@@ -26,3 +26,5 @@ The `uvicorn.error.lead_funnel` logger emits `lead_funnel` JSON records. Current
 Completion means all city and domain work finished, not that a requested lead target was reached. Inspect warnings and error counters for individual provider failures. Consecutive provider errors or account/quota failures stop the search. Cancellation and failures retain already-saved contacts. A backend restart marks an active search interrupted; it is not automatically resumed.
 
 Old campaign diagnostics used different events and counters. Their historical data remains stored; it cannot be interpreted as the current sequential workflow.
+
+Website filtering now skips only blank fields. `website_parse_fallback` records nonblank values whose domain could not be parsed; these still enter the Hunter queue after rank filtering and deduplication. `domains_ready.details.blank_websites` is the count skipped at this step. Older exports may use `unusable_websites` under the previous stricter policy.

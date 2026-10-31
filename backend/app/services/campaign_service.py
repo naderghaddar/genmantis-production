@@ -211,9 +211,13 @@ class CampaignService:
                 website, domain, domain_reason = extract_domain(business.business_website)
                 if not domain:
                     progress["no_contact"] += 1
-                    self._diagnose(campaign, "domain_skipped", message="Business skipped: " + (domain_reason or "no usable website").replace("_", " ") + ".",
+                    self._diagnose(campaign, "domain_skipped", message="Business skipped: website field is blank.",
                         reason=domain_reason, city=location.city, business=business.business_name)
                     continue
+                if domain_reason == "website_domain_unparsed":
+                    self._diagnose(campaign, "website_parse_fallback", level="warning",
+                        message="Website field is nonblank but its domain could not be parsed. Retaining this result and using the field value for Hunter lookup and deduplication.",
+                        reason=domain_reason, city=location.city)
                 business.business_website, business.business_domain = website, domain
                 business.business_city = business.business_city or location.city
                 business.business_state = business.business_state or location.state
@@ -232,8 +236,8 @@ class CampaignService:
                 domains[domain] = lead
                 self._diagnose(campaign, "domain_queued", domain=domain, message="Unique company domain queued for Hunter.", rank=lead.google_maps_rank, city=location.city)
             progress["discovered"] = len(domains)
-            self._diagnose(campaign, "domains_ready", message=f"Domain filtering complete: {len(domains)} unique domains, {progress['duplicates']} duplicates removed, {progress['excluded']} rank exclusions, {progress['no_contact']} unusable websites.",
-                domains=len(domains), duplicates=progress["duplicates"], rank_exclusions=progress["excluded"], unusable_websites=progress["no_contact"])
+            self._diagnose(campaign, "domains_ready", message=f"Domain filtering complete: {len(domains)} unique domains, {progress['duplicates']} duplicates removed, {progress['excluded']} rank exclusions, {progress['no_contact']} blank websites.",
+                domains=len(domains), duplicates=progress["duplicates"], rank_exclusions=progress["excluded"], blank_websites=progress["no_contact"])
             self._save(identity, campaign, "enriching",
                 f"All cities scraped. Processing {len(domains)} unique company domains, one at a time.")
             hunter_errors = verification_errors = 0
