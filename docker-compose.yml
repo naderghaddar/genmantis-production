@@ -8,7 +8,6 @@ services:
     environment:
       ALLOW_LOCAL_WORKSPACE: "false"
       WORKSPACE_DB_PATH: /data/workspace.sqlite3
-      AGENT_DB_PATH: /data/agent.sqlite3
     volumes:
       - genmantis-data:/data
     restart: unless-stopped

@@ -5,11 +5,11 @@ import time
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
-from app.api.agent_routes import browser_owner
-from app.agents.research_tools import source_catalog
-from app.models.workspace import AdvisorMessage, BusinessProfile, BulkLeadPatch, CampaignAction, CampaignPlan, LeadPatch, now
+from app.api.session import browser_owner
+from app.models.workspace import BusinessProfile, BulkLeadPatch, CampaignAction, LeadPatch, LeadDelete, now
+from app.models.search import SearchPlan, CityImport, parse_cities
 from app.services.csv_service import safe_cell
 from app.services.lead_policy import verified_contact, normalize_record, visible_leads
 from app.services.workspace_store import WorkspaceIdentity
@@ -55,9 +55,9 @@ Identity = Annotated[WorkspaceIdentity, Depends(identity)]
 def config(request: Request):
     settings = request.app.state.workspace_settings
     return {"auth": {"url": settings.supabase_url, "publishable_key": settings.supabase_publishable_key,
-            "local_enabled": settings.allow_local_workspace}, "sources": source_catalog(settings),
+            "local_enabled": settings.allow_local_workspace}, "sources": [],
         "integrations": [{"name": name, "connected": bool(key), "purpose": purpose} for name, key, purpose in [
-            ("OpenAI", settings.openai_key, "Research and campaign strategy"), ("Apify", settings.apify_token, "Google Maps discovery"),
+            ("Apify", settings.apify_token, "Google Maps discovery"),
             ("Hunter", settings.hunter_key, "Company contact discovery"), ("NeverBounce", settings.neverbounce_key, "Email verification")]]}
 
 
@@ -67,7 +67,6 @@ def workspace(request: Request, user: Identity):
     store.flush_recovery(user)
     campaigns = [request.app.state.campaigns.recover(user, item) for item in store.list(user, "campaign")]
     leads = visible_leads(store.list(user, "lead"))
-    threads = store.list(user, "thread")
     try:
         profile = store.get(user, "profile", "business")["profile"]
     except HTTPException as error:
@@ -75,7 +74,7 @@ def workspace(request: Request, user: Identity):
             raise
         profile = BusinessProfile().model_dump()
     return {"profile": profile, "campaigns": campaigns, "leads": leads,
-        "threads": [{key: item.get(key) for key in ("id", "title", "updated_at", "status")} for item in threads],
+        "threads": [],
         "account": {"email": user.email, "storage": "cloud" if user.token else "local"}}
 
 
@@ -85,12 +84,12 @@ def save_profile(body: BusinessProfile, request: Request, user: Identity):
 
 
 @router.post("/campaigns", status_code=201)
-def create_campaign(body: CampaignPlan, request: Request, user: Identity):
+def create_campaign(body: SearchPlan, request: Request, user: Identity):
     return request.app.state.campaigns.create(user, body)
 
 
 @router.put("/campaigns/{campaign_id}")
-def update_campaign(campaign_id: str, body: CampaignPlan, request: Request, user: Identity, version: int = Query(ge=1)):
+def update_campaign(campaign_id: str, body: SearchPlan, request: Request, user: Identity, version: int = Query(ge=1)):
     return request.app.state.campaigns.update_plan(user, campaign_id, body, version)
 
 
@@ -109,7 +108,7 @@ def patch_lead(store, user, lead_id, body):
         lead = normalize_record(store.get(user, "lead", lead_id))
         changes = body.model_dump(exclude_none=True)
         if changes.get("stage") == "qualified" and not verified_contact(lead):
-            raise HTTPException(409, "Only a named contact with a NeverBounce valid, catchall or unknown result can move to Qualified.")
+            raise HTTPException(409, "Only a non-generic email with a NeverBounce valid, catchall or unknown result can move to Qualified.")
         changed = [key for key, value in changes.items() if lead.get(key) != value]
         lead.update(changes)
         if changed:
@@ -134,6 +133,16 @@ def update_lead(lead_id: str, body: LeadPatch, request: Request, user: Identity)
     return patch_lead(request.app.state.workspace_store, user, lead_id, body)
 
 
+@router.delete("/leads/bulk")
+def delete_leads(body: LeadDelete, request: Request, user: Identity):
+    return request.app.state.workspace_store.delete_leads(user, body.ids)
+
+
+@router.delete("/leads/{lead_id}")
+def delete_lead(lead_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")], request: Request, user: Identity):
+    return request.app.state.workspace_store.delete_leads(user, [lead_id])
+
+
 @router.get("/leads/export")
 def export_leads(request: Request, user: Identity, category: str = "verified", campaign_id: str = ""):
     records = visible_leads(request.app.state.workspace_store.list(user, "lead"))
@@ -155,16 +164,9 @@ def export_leads(request: Request, user: Identity, category: str = "verified", c
     return Response(output.getvalue().encode("utf-8-sig"), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="genmantis_leads.csv"'})
 
 
-@router.post("/threads", status_code=201)
-def create_thread(request: Request, user: Identity):
-    return request.app.state.research_agent.create(user)
-
-
-@router.get("/threads/{thread_id}")
-def get_thread(thread_id: str, request: Request, user: Identity):
-    return request.app.state.workspace_store.get(user, "thread", thread_id)
-
-
-@router.post("/threads/{thread_id}/messages")
-def advisor_message(thread_id: str, body: AdvisorMessage, request: Request, user: Identity):
-    return request.app.state.research_agent.message(user, thread_id, body)
+@router.post("/cities/import")
+def import_cities(body: CityImport, user: Identity):
+    try:
+        return {"locations": [location.model_dump() for location in parse_cities(body.csv)]}
+    except (ValueError, csv.Error) as error:
+        raise HTTPException(422, str(error)) from None

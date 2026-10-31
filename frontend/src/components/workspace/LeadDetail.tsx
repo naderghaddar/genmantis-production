@@ -3,9 +3,9 @@ import {
   Building2,
   Check,
   Clock3,
-  FileText,
   Mail,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 import {
   type CRMLead,
@@ -18,6 +18,7 @@ import {
   stageName,
 } from "../../services/workspaceApi";
 import { Badge, ExternalLink, Modal } from "./Shared";
+import DeleteLeadsDialog from "./DeleteLeadsDialog";
 
 export default function LeadDetail({
   lead,
@@ -36,6 +37,7 @@ export default function LeadDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const contact = lead.lead.contact;
   async function save() {
     setBusy(true);
@@ -61,7 +63,7 @@ export default function LeadDetail({
     }
   }
   return (
-    <Modal title="Lead details" onClose={onClose} wide>
+    <><Modal title="Lead details" onClose={onClose} wide>
       <div className="lead-detail">
         <div className="lead-identity">
           <div className="company-avatar large">
@@ -90,7 +92,7 @@ export default function LeadDetail({
                   <h4>
                     {[contact.first_name, contact.last_name]
                       .filter(Boolean)
-                      .join(" ") || "Company contact"}
+                      .join(" ") || "Name unavailable"}
                   </h4>
                   <p className="muted">
                     {contact.job_title ||
@@ -159,37 +161,6 @@ export default function LeadDetail({
             </section>
           </div>
           <div>
-            <section className="detail-section">
-              <h3>
-                <FileText size={16} /> Research & fit{" "}
-                <Badge value={lead.assessment.fit}>
-                  {lead.assessment.fit === "unknown"
-                    ? "Needs assessment"
-                    : lead.assessment.fit + " fit"}
-                </Badge>
-              </h3>
-              <p>{lead.assessment.summary}</p>
-              {lead.assessment.reasons.map((reason, i) => (
-                <p className="research-reason" key={i}>
-                  <Check size={13} />
-                  {reason}
-                </p>
-              ))}
-              {!!lead.assessment.unknowns.length && (
-                <div className="unknowns">
-                  <strong>Still unknown</strong>
-                  {lead.assessment.unknowns.map((value, i) => (
-                    <p key={i}>{value}</p>
-                  ))}
-                </div>
-              )}
-              {lead.assessment.evidence.map((item, i) => (
-                <div className="evidence-card" key={i}>
-                  <ExternalLink url={item.url}>{item.title}</ExternalLink>
-                  <p>{item.observation}</p>
-                </div>
-              ))}
-            </section>
             <section className="detail-section">
               <h3>Relationship</h3>
               <label>
@@ -288,6 +259,7 @@ export default function LeadDetail({
           </p>
         )}
         <div className="modal-actions">
+          <button type="button" className="btn-danger" disabled={busy} onClick={() => setDeleting(true)}><Trash2 size={15} /> Delete lead</button>
           <span className="save-status">
             {saved && (
               <>
@@ -308,5 +280,9 @@ export default function LeadDetail({
         </div>
       </div>
     </Modal>
+    {deleting && <DeleteLeadsDialog leads={[lead]} onClose={() => setDeleting(false)} onDeleted={async () => {
+      await onSaved();
+      onClose();
+    }} />}</>
   );
 }

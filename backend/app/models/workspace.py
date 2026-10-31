@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -168,3 +168,7 @@ class CampaignAction(Strict):
 class BulkLeadPatch(Strict):
     ids: list[str] = Field(min_length=1, max_length=100)
     changes: LeadPatch
+
+
+class LeadDelete(Strict):
+    ids: list[Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]] = Field(min_length=1, max_length=100)

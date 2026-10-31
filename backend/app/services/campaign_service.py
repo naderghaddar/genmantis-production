@@ -1,6 +1,5 @@
 import hashlib
 from datetime import datetime
-from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, RLock
 from uuid import uuid4
@@ -11,22 +10,20 @@ from fastapi import HTTPException
 
 from app.models.leads import Lead
 from app.models.schemas import ScrapeRequest
-from app.models.workspace import CampaignPlan, now, new_id
-from app.services.apify_service import ApifyService, PLACES_PER_PASS, build_actor_input
-from app.services.business_service import deduplicate_businesses, unique_companies
+from app.models.workspace import now, new_id
+from app.models.search import SearchPlan
+from app.services.apify_service import ApifyService, build_actor_input
+from app.services.business_service import normalize_business
 from app.services.domain_service import extract_domain
-from app.services.enrichment_pipeline import VerificationCache
-from app.services.contact_selector import rank_candidates, is_generic, decision_tier
+from app.services.contact_selector import decision_tier
 from app.services.lead_diagnostics import emit
-from app.services.company_qualification import matches_niche, official_domain_basis, contact_matches_domain, words
-from app.services.lead_policy import ACCEPTED_RESULTS, is_person
+from app.services.lead_policy import ACCEPTED_RESULTS
 from app.services.hunter_service import HunterService
 from app.services.neverbounce_service import NeverBounceService
 from app.services.provider_http import ProviderHTTP
 from app.services.qualification_service import qualify
-from app.services.research_service import ResearchService, public_url
 
-ACTIVE = {"queued", "discovering", "researching", "enriching", "recommending"}
+ACTIVE = {"queued", "discovering", "enriching", "researching", "recommending"}
 
 
 class CampaignService:
@@ -38,89 +35,71 @@ class CampaignService:
         self.lock = RLock()
         self.closed = False
 
-    def create(self, identity, plan: CampaignPlan, thread_id=None, request_id=None):
-        for website in plan.websites:
-            if not public_url(website):
-                raise HTTPException(422, "Use public HTTP or HTTPS company websites.")
+    def create(self, identity, plan: SearchPlan):
         if len(self.store.list(identity, "campaign")) >= 500:
-            raise HTTPException(429, "Workspace campaign limit reached.")
-        campaign = {"id": new_id(), "plan": plan.model_dump(), "version": 1, "status": "draft",
-            "created_at": now(), "message": "Ready to find verified people for your SEO outreach.", "events": [],
-            "thread_id": thread_id, "request_id": request_id, "locations": [], "recommendations": [],
-            "lead_ids": [], "policy_version": "person-v3",
-            "progress": {"discovered": 0, "processed": 0, "verified": 0, "review": 0, "excluded": 0, "reused": 0, "target": plan.max_leads, "rejected": 0, "no_contact": 0, "verification_errors": 0},
-            "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0}, "warnings": []}
+            raise HTTPException(429, "Workspace search limit reached.")
+        campaign = {"id": new_id(), "plan": {**plan.model_dump(), "name": plan.niche, "source": "google_maps"},
+            "version": 1, "status": "draft", "workflow": "sequential-v1", "created_at": now(),
+            "message": "Ready to search cities in order.", "events": [], "locations": [], "lead_ids": [],
+            "progress": {"scraped": 0, "discovered": 0, "processed": 0, "verified": 0,
+                "duplicates": 0, "checked": 0, "cities_completed": 0, "cities_total": len(plan.locations),
+                "review": 0, "excluded": 0, "reused": 0, "rejected": 0, "no_contact": 0, "verification_errors": 0},
+            "warnings": []}
         return self.store.save(identity, "campaign", campaign)
 
-    def update_plan(self, identity, campaign_id, plan, version):
+    def update_plan(self, identity, campaign_id, plan: SearchPlan, version):
         with self.store.operation_lock(identity.owner):
             campaign = self.store.get(identity, "campaign", campaign_id)
             if campaign["status"] != "draft" or campaign["version"] != version:
-                raise HTTPException(409, "Only the current draft can be edited. Duplicate a finished campaign to run a new search.")
-            for website in plan.websites:
-                if not public_url(website):
-                    raise HTTPException(422, "Use public company websites.")
-            campaign["plan"], campaign["version"] = plan.model_dump(), version + 1
-            campaign["progress"]["target"] = plan.max_leads
+                raise HTTPException(409, "Only the current draft can be edited.")
+            campaign.update(plan={**plan.model_dump(), "name": plan.niche, "source": "google_maps"},
+                version=version + 1, workflow="sequential-v1")
+            campaign["progress"]["cities_total"] = len(plan.locations)
             return self.store.save(identity, "campaign", campaign)
 
     def start(self, identity, campaign_id, version):
         with self.lock, self.store.operation_lock(identity.owner):
             campaign = self.store.get(identity, "campaign", campaign_id)
             if campaign["version"] != version:
-                raise HTTPException(409, "The campaign changed. Review the latest version.")
+                raise HTTPException(409, "The search changed. Refresh and try again.")
             if campaign["status"] != "draft":
                 return self.recover(identity, campaign)
+            if campaign.get("workflow") != "sequential-v1":
+                raise HTTPException(409, "Create a new search using the city form. Old advisor drafts cannot be started.")
             if self.closed or len(self.jobs) >= self.settings.max_active_runs:
-                raise HTTPException(429, "Another campaign is running. Wait for it to finish.")
+                raise HTTPException(429, "Another search is running. Wait for it to finish.")
             if any(item["id"] in self.jobs for item in self.store.list(identity, "campaign")):
-                raise HTTPException(409, "This workspace already has an active search. Wait or stop it before starting another, so new leads cannot be counted twice.")
-            # Preserve the verification policy of drafts created before per-search policies.
-            campaign["plan"].setdefault("email_policy", "accepted")
-            campaign["plan"].setdefault("max_city_rounds", 1)
-            campaign["plan"].setdefault("max_leads_per_company", 1)
-            plan = CampaignPlan.model_validate(campaign["plan"])
-            required = [("Hunter", self.settings.hunter_key), ("NeverBounce", self.settings.neverbounce_key)]
-            if plan.source == "google_maps":
-                required.append(("Apify", self.settings.apify_token))
-            if plan.source == "web_research" or plan.research_websites:
-                required.append(("OpenAI", self.settings.openai_key))
-            missing = [name for name, key in required if not key or key == "your_token_here"]
+                raise HTTPException(409, "This workspace already has an active search.")
+            missing = [name for name, key in [("Apify", self.settings.apify_token),
+                ("Hunter", self.settings.hunter_key), ("NeverBounce", self.settings.neverbounce_key)]
+                if not key or key == "your_token_here"]
             if missing:
-                raise HTTPException(503, "Configure " + ", ".join(missing) + " before starting this campaign.")
-            # A durable reservation precedes every external paid action.
-            campaign.update(status="queued", approved_version=version, process_id=self.process_id, started_at=now())
-            campaign["policy_version"] = "person-v3"
-            campaign.setdefault("locations", [])
-            campaign.setdefault("recommendations", [])
-            campaign.setdefault("lead_ids", [])
-            campaign["progress"]["target"] = plan.max_leads
-            for key in ("rejected", "no_contact", "verification_errors"):
-                campaign["progress"].setdefault(key, 0)
+                raise HTTPException(503, "Configure " + ", ".join(missing) + " before starting a search.")
+            campaign.update(status="queued", process_id=self.process_id, started_at=now())
             self.store.save(identity, "campaign", campaign)
             cancel = self.jobs[campaign_id] = Event()
             try:
                 self.executor.submit(self._run, identity, campaign, cancel)
             except Exception:
                 self.jobs.pop(campaign_id, None)
-                campaign.update(status="failed", message="Unable to schedule the campaign. No provider work was started.")
+                campaign.update(status="failed", message="Unable to schedule search. No provider work was started.")
                 self.store.save(identity, "campaign", campaign)
                 raise HTTPException(503, campaign["message"]) from None
             return campaign
 
     def recover(self, identity, campaign):
         if campaign["status"] in ACTIVE and campaign.get("process_id") != self.process_id:
-            campaign.update(status="interrupted", message="The backend restarted during this campaign. Saved leads are retained. Check the source provider before duplicating this campaign.")
+            campaign.update(status="interrupted", message="The backend restarted. Saved leads are retained; this search was not automatically restarted.")
             self.store.save(identity, "campaign", campaign)
         return campaign
 
     def cancel(self, identity, campaign_id):
-        campaign = self.store.get(identity, "campaign", campaign_id)
+        self.store.get(identity, "campaign", campaign_id)
         with self.lock:
             if campaign_id in self.jobs:
                 self.jobs[campaign_id].set()
-                return {"requested": True, "message": "Stopping after the current provider request. An existing Apify actor may still finish."}
-        return {"requested": False, "message": "This campaign is not running in this process."}
+                return {"requested": True, "message": "Stopping after the current provider request."}
+        return {"requested": False, "message": "This search is not running."}
 
     def _save(self, identity, campaign, status=None, message=None):
         if status:
@@ -136,388 +115,254 @@ class CampaignService:
             raise
 
     def _diagnose(self, campaign, event, **fields):
-        diagnostics = campaign.setdefault("diagnostics", {"version": 1, "counts": {}})
-        counts = diagnostics["counts"]
+        message = fields.pop("message", event.replace("_", " "))
+        level = fields.pop("level", "info")
+        counts = campaign.setdefault("diagnostics", {"version": 2, "counts": {}})["counts"]
         counts[event] = counts.get(event, 0) + 1
-        if fields.get("reason"):
-            reasons = diagnostics.setdefault("reasons", {}).setdefault(event, {})
-            reasons[fields["reason"]] = reasons.get(fields["reason"], 0) + 1
+        sequence = campaign["diagnostics"].get("sequence", 0) + 1
+        campaign["diagnostics"]["sequence"] = sequence
+        # Only explicit diagnostic fields are recorded: never raw provider responses,
+        # request headers, credentials, contact names or email addresses.
+        entry = {"id": sequence, "at": now(), "event": event, "level": level,
+            "message": message, "domain": fields.get("domain"), "details": fields}
+        campaign.setdefault("debug_log", []).append(entry)
+        campaign["debug_log"] = campaign["debug_log"][-500:]
         emit(event, campaign_id=campaign["id"], **fields)
 
-    def _discover(self, plan, campaign, identity, cancel, research):
-        if plan.source == "web_research":
-            items, warnings = research.discover(plan)
-            campaign["warnings"].extend(warnings)
-            return items
-        if plan.source == "company_websites":
-            return [{"title": (extract_domain(url)[1] or url), "website": public_url(url),
-                "discovery_source": "company_websites", "source_url": public_url(url)} for url in plan.websites]
+    def _hunter_diagnostic(self, identity, campaign, event, **fields):
+        self._diagnose(campaign, event, **fields)
+        # Flush before a blocking provider call and after its selection/error result,
+        # so the four-second UI poll can show which request is in flight.
+        if event in {"hunter_query_started", "hunter_people_filter", "hunter_page_error"}:
+            self._save(identity, campaign)
+
+    @staticmethod
+    def _check_cancel(cancel):
+        if cancel.is_set():
+            raise InterruptedError
+
+    def _discover(self, identity, campaign, plan, location, cancel):
         import time
         apify = ApifyService(ApifyClient(self.settings.apify_token, max_retries=0, timeout_secs=30))
-        request = ScrapeRequest(niche=plan.niche, city=plan.city, state=plan.state, max_leads=30)
+        request = ScrapeRequest(niche=plan.niche, city=location.city, state=location.state)
         payload = build_actor_input(request)
-        payload["maxCrawledPlacesPerSearch"] = campaign["locations"][-1]["business_limit"]
-        self._diagnose(campaign, "apify_request", actor_input=payload)
-        scrape = apify.start(request, business_limit=campaign["locations"][-1]["business_limit"])
-        campaign["apify_run_id"] = scrape.run_id
+        payload["maxCrawledPlacesPerSearch"] = plan.places_per_city
+        local = {**location.model_dump(), "status": "discovering", "discovered": 0,
+            "processed": 0, "leads": 0, "business_limit": plan.places_per_city}
+        campaign["locations"].append(local)
+        self._save(identity, campaign, "discovering",
+            f"Searching city {len(campaign['locations'])}/{len(plan.locations)}: {location.city}, {location.state}.")
+        self._diagnose(campaign, "apify_request", message=f"Starting Apify for {location.city}, {location.state}.", actor_input=payload)
+        self._save(identity, campaign)
+        self._check_cancel(cancel)
+        scrape = apify.start(request, business_limit=plan.places_per_city)
+        campaign["apify_run_id"] = local["apify_run_id"] = scrape.run_id
         campaign.setdefault("apify_run_ids", []).append(scrape.run_id)
-        campaign["locations"][-1]["apify_run_id"] = scrape.run_id
-        self._save(identity, campaign, message="Google Maps discovery is running.")
+        self._diagnose(campaign, "apify_started", message="Apify run created; waiting for results.", run_id=scrape.run_id)
+        self._save(identity, campaign)
         deadline = time.monotonic() + self.settings.apify_wait_timeout
         while scrape.status == "running":
-            if cancel.wait(self.settings.apify_poll_interval):
+            stopped = cancel.wait(self.settings.apify_poll_interval)
+            timed_out = time.monotonic() > deadline
+            if stopped or timed_out:
                 try:
                     apify.abort(scrape.run_id)
-                    self._diagnose(campaign, "apify_abort_requested", run_id=scrape.run_id)
-                except Exception as error:
-                    self._diagnose(campaign, "apify_abort_failed", run_id=scrape.run_id, exception_type=type(error).__name__)
-                raise InterruptedError
-            if time.monotonic() > deadline:
-                raise RuntimeError("Source wait timed out. Check Apify Console before starting another campaign.")
+                except Exception:
+                    campaign["warnings"].append("Apify abort could not be confirmed; check the actor run in Apify.")
+                    self._diagnose(campaign, "apify_abort_failed", level="warning", message="Could not confirm Apify abort.", run_id=scrape.run_id)
+                if stopped:
+                    raise InterruptedError
+                raise RuntimeError("Apify wait timed out")
             scrape = apify.status(scrape.run_id)
+        self._check_cancel(cancel)
         if scrape.status != "succeeded":
-            raise RuntimeError("Google Maps discovery failed. Check Apify Console.")
-        return apify.results(scrape.run_id)[:campaign["locations"][-1]["business_limit"]]
+            raise RuntimeError("Apify discovery failed")
+        items = apify.results(scrape.run_id)[:plan.places_per_city]
+        local.update(status="completed", discovered=len(items))
+        campaign["progress"]["scraped"] += len(items)
+        campaign["progress"]["cities_completed"] += 1
+        self._diagnose(campaign, "city_scraped", message=f"{location.city}, {location.state}: received {len(items)} businesses.",
+            city=location.city, state=location.state, businesses=len(items))
+        self._save(identity, campaign)
+        return items
 
     def _run(self, identity, campaign, cancel):
-        research = ResearchService(self.settings)
-        plan = CampaignPlan.model_validate(campaign["plan"])
         progress = campaign["progress"]
-        progress.update(target=plan.max_leads)
-        seen_domains, seen_emails, seen_businesses = set(), set(), set()
-        recommendations_research = None
-        consecutive_check_errors = 0
-        consecutive_hunter_errors = 0
         try:
-            # Include every saved email, even archived/excluded/legacy records and
-            # pending recovery writes. Load compact keys once before paid work.
-            lead_index = self.store.lead_index(identity)
-            seen_emails = set(lead_index.emails)
-            self._diagnose(campaign, "campaign_started", source=plan.source, target=plan.max_leads,
-                existing_emails=len(seen_emails), company_limit=plan.max_leads_per_company,
-                email_policy=plan.email_policy, research_websites=plan.research_websites,
-                min_maps_rank=plan.min_google_maps_rank, max_maps_rank=plan.max_google_maps_rank,
-                max_city_rounds=plan.max_city_rounds, max_hunter_results=self.settings.max_hunter_results,
-                max_hunter_pages=self.settings.max_hunter_pages, research_call_budget=self.settings.research_max_calls)
-            try:
-                profile = self.store.get(identity, "profile", "business").get("profile", {})
-            except HTTPException as error:
-                if error.status_code != 404:
-                    raise
-                profile = {"offer": "Local SEO services", "ideal_customer": "Local businesses that can benefit from better search visibility"}
-            locations = list(plan.locations) or [None]
-            if plan.source == "company_websites":
-                locations = [None]
+            plan = SearchPlan.model_validate({key: campaign["plan"][key] for key in ("niche", "locations", "places_per_city")})
+            index = self.store.lead_index(identity)
+            seen_emails = set(index.emails)
+            self._diagnose(campaign, "campaign_started", message=f"Search started: {len(plan.locations)} cities; {len(seen_emails)} saved emails loaded for duplicate checks.",
+                cities=len(plan.locations), existing_emails=len(seen_emails))
+            # Complete every city before any Hunter or NeverBounce requests.
+            collected = []
+            for location in plan.locations:
+                self._check_cancel(cancel)
+                collected.extend((item, location) for item in self._discover(identity, campaign, plan, location, cancel))
+            # Rank is query-specific: qualify each city result before retaining one per domain.
+            domains = {}
+            self._diagnose(campaign, "domain_filtering_started", message=f"All cities finished. Filtering {len(collected)} business results into unique company domains.", businesses=len(collected))
+            self._save(identity, campaign)
+            for item_index, (item, location) in enumerate(collected):
+                self._check_cancel(cancel)
+                if item_index and item_index % 100 == 0:
+                    self._save(identity, campaign)
+                business = normalize_business(item)
+                website, domain, domain_reason = extract_domain(business.business_website)
+                if not domain:
+                    progress["no_contact"] += 1
+                    self._diagnose(campaign, "domain_skipped", message="Business skipped: " + (domain_reason or "no usable website").replace("_", " ") + ".",
+                        reason=domain_reason, city=location.city, business=business.business_name)
+                    continue
+                business.business_website, business.business_domain = website, domain
+                business.business_city = business.business_city or location.city
+                business.business_state = business.business_state or location.state
+                lead = Lead(business=business, run_id=campaign["id"])
+                request = ScrapeRequest(niche=plan.niche, city=location.city, state=location.state,
+                    min_google_maps_rank=location.min_rank, max_google_maps_rank=location.max_rank)
+                if not qualify(lead, request):
+                    progress["excluded"] += 1
+                    self._diagnose(campaign, "rank_excluded", domain=domain, message="Domain excluded by rank filter: " + (lead.filter_reason or "rank unavailable").replace("_", " ") + ".",
+                        rank=lead.google_maps_rank, min_rank=location.min_rank, max_rank=location.max_rank, city=location.city)
+                    continue
+                if domain in domains:
+                    progress["duplicates"] += 1
+                    self._diagnose(campaign, "duplicate_domain", domain=domain, message="Duplicate domain removed; the first eligible result is already queued.")
+                    continue
+                domains[domain] = lead
+                self._diagnose(campaign, "domain_queued", domain=domain, message="Unique company domain queued for Hunter.", rank=lead.google_maps_rank, city=location.city)
+            progress["discovered"] = len(domains)
+            self._diagnose(campaign, "domains_ready", message=f"Domain filtering complete: {len(domains)} unique domains, {progress['duplicates']} duplicates removed, {progress['excluded']} rank exclusions, {progress['no_contact']} unusable websites.",
+                domains=len(domains), duplicates=progress["duplicates"], rank_exclusions=progress["excluded"], unusable_websites=progress["no_contact"])
+            self._save(identity, campaign, "enriching",
+                f"All cities scraped. Processing {len(domains)} unique company domains, one at a time.")
+            hunter_errors = verification_errors = 0
             with httpx.Client(timeout=httpx.Timeout(35, connect=10), follow_redirects=False) as client:
                 hunter = HunterService(ProviderHTTP(client, "hunter", self.settings.provider_retries,
                     self.settings.provider_interval, cancel=cancel), self.settings.hunter_key,
                     self.settings.max_hunter_results, self.settings.max_hunter_pages)
-                hunter.diagnostic = lambda event, **fields: self._diagnose(campaign, event, **fields)
-                cache = VerificationCache(NeverBounceService(ProviderHTTP(client, "neverbounce", self.settings.provider_retries,
-                    self.settings.provider_interval, cancel=cancel), self.settings.neverbounce_key))
-                for location, round_number in self._locations(campaign, plan, locations, cancel):
-                    if cancel.is_set():
-                        raise InterruptedError
-                    if progress["verified"] >= plan.max_leads:
-                        break
-                    local_plan = plan.model_copy(update={"city": location.city, "state": location.state, "locations": [location]}) if location else plan
-                    local = {"city": local_plan.city, "state": local_plan.state, "status": "discovering", "discovered": 0, "processed": 0, "leads": 0,
-                        "round": round_number, "business_limit": PLACES_PER_PASS * round_number, "source_count": 0, "new_domains": 0}
-                    campaign["locations"].append(local)
-                    label = ", ".join(filter(None, [local_plan.city, local_plan.state])) or "the supplied websites"
-                    self._save(identity, campaign, "discovering", f"Searching up to {local['business_limit']} businesses in {label} (pass {round_number}). {progress['verified']}/{plan.max_leads} leads found.")
-                    items = self._discover(local_plan, campaign, identity, cancel, research)
-                    local["source_count"] = len(items)
-                    places = deduplicate_businesses(items[:local["business_limit"]])
-                    businesses = unique_companies(places)
-                    self._diagnose(campaign, "discovery_batch", city=local_plan.city, state=local_plan.state,
-                        round=round_number, source_records=len(items), unique_places=len(places),
-                        unique_companies=len(businesses), business_limit=local["business_limit"])
-                    local.update(discovered=len(businesses), status="enriching")
-                    for business in businesses:
-                        business_key = extract_domain(business.business_website)[1] or (
-                            business.business_name, business.business_address)
-                        if business_key not in seen_businesses:
-                            seen_businesses.add(business_key)
-                            progress["discovered"] += 1
-                    for business in businesses:
-                        if cancel.is_set():
-                            raise InterruptedError
-                        if progress["verified"] >= plan.max_leads:
-                            break
-                        progress["processed"] += 1
-                        local["processed"] += 1
-                        _, domain, reason = extract_domain(business.business_website)
-                        business.business_domain = domain
-                        context = {"domain": domain, "company_index": progress["processed"],
-                            "city": local_plan.city, "round": round_number}
-                        if not domain:
-                            progress["no_contact"] += 1
-                            self._diagnose(campaign, "company_no_domain", **context, reason=reason)
-                            self._save(identity, campaign)
-                            continue
-                        if domain in seen_domains:
+                hunter.diagnostic = lambda event, **fields: self._hunter_diagnostic(identity, campaign, event, **fields)
+                verifier = NeverBounceService(ProviderHTTP(client, "neverbounce", self.settings.provider_retries,
+                    self.settings.provider_interval, cancel=cancel), self.settings.neverbounce_key)
+                for domain, base in domains.items():
+                    self._check_cancel(cancel)
+                    before = {key: progress[key] for key in ("checked", "verified", "rejected", "reused", "verification_errors")}
+                    self._diagnose(campaign, "domain_started", domain=domain, message=f"Domain {progress['processed'] + 1}/{len(domains)}: searching Hunter for up to two people.")
+                    self._save(identity, campaign, message=f"Processing domain {progress['processed'] + 1}/{len(domains)}: {domain}.")
+                    search = hunter.search_people(domain)
+                    self._check_cancel(cancel)
+                    reason = search.reason or ""
+                    self._diagnose(campaign, "hunter_selection", domain=domain, message=f"Hunter selected {len(search.contacts)} of at most 2 non-generic contacts (names optional).",
+                        selected=len(search.contacts), reason=search.reason)
+                    self._save(identity, campaign)
+                    failed = bool(reason and reason not in {"hunter_search_limit_reached", "hunter_privacy_suppressed"})
+                    hunter_errors = hunter_errors + 1 if failed else 0
+                    if reason.endswith(("quota_exhausted", "authentication_error", "rate_limit_cooldown")) or hunter_errors >= 3:
+                        campaign["stop_reason"] = reason or "hunter_unavailable"
+                        raise RuntimeError("Hunter unavailable")
+                    if failed:
+                        warning = "Some Hunter searches failed. Those domains may have no saved contacts."
+                        if warning not in campaign["warnings"]:
+                            campaign["warnings"].append(warning)
+                    if not search.contacts:
+                        progress["no_contact"] += 1
+                        self._diagnose(campaign, "no_eligible_contacts", domain=domain, level="warning", message="No lead from this domain: Hunter returned no eligible non-generic emails.", reason=search.reason)
+                    # Selection is capped before verification. Rejected or existing emails
+                    # do not cause replacement checks beyond these two selected contacts.
+                    for candidate_index, contact in enumerate(search.contacts[:2], start=1):
+                        self._check_cancel(cancel)
+                        email = contact.email.strip().casefold()
+                        if email in seen_emails:
                             progress["reused"] += 1
-                            self._diagnose(campaign, "company_repeated_domain", **context)
+                            self._diagnose(campaign, "duplicate_email", domain=domain, message=f"Contact {candidate_index}: email already saved or encountered; skipping NeverBounce.", contact_number=candidate_index)
+                            continue
+                        seen_emails.add(email)
+                        self._diagnose(campaign, "verification_started", domain=domain, message=f"Contact {candidate_index}: waiting for NeverBounce.", contact_number=candidate_index)
+                        self._save(identity, campaign)
+                        verification = verifier.verify(email)
+                        progress["checked"] += 1
+                        self._diagnose(campaign, "candidate_verification", domain=domain,
+                            message=f"Contact {candidate_index}: NeverBounce returned {verification.result}.",
+                            level="error" if verification.result == "verification_error" else "info",
+                            contact_number=candidate_index,
+                            result=verification.result, failure_reason=verification.failure_reason)
+                        self._check_cancel(cancel)
+                        failed = verification.result == "verification_error"
+                        verification_errors = verification_errors + 1 if failed else 0
+                        progress["verification_errors"] += int(failed)
+                        reason = verification.failure_reason or ""
+                        if reason.endswith(("quota_exhausted", "authentication_error", "rate_limit_cooldown")) or verification_errors >= 3:
+                            campaign["stop_reason"] = reason or "neverbounce_unavailable"
+                            raise RuntimeError("NeverBounce unavailable")
+                        if verification.result not in ACCEPTED_RESULTS:
+                            progress["rejected"] += 1
+                            self._diagnose(campaign, "contact_rejected", domain=domain, level="warning", message=f"Contact {candidate_index}: {verification.result} is not accepted; no database save.", contact_number=candidate_index)
                             self._save(identity, campaign)
                             continue
-                        seen_domains.add(domain)
-                        local["new_domains"] += 1
-                        if lead_index.at_company_limit(domain, plan.max_leads_per_company):
-                            progress["reused"] += 1
-                            self._diagnose(campaign, "company_at_saved_limit", **context,
-                                saved_count=lead_index.company_counts[domain], limit=plan.max_leads_per_company)
-                            self._save(identity, campaign)
-                            continue
-                        base = Lead(business=business, run_id=campaign["id"])
-                        if plan.source == "google_maps":
-                            if not matches_niche(business, plan.niche):
-                                progress["excluded"] += 1
-                                self._diagnose(campaign, "company_niche_excluded", **context, reason="category_does_not_establish_requested_niche")
-                                self._save(identity, campaign)
-                                continue
-                            if business.business_city and words(business.business_city) != words(local_plan.city):
-                                progress["excluded"] += 1
-                                self._diagnose(campaign, "company_location_excluded", **context, reason="listed_city_outside_requested_city")
-                                self._save(identity, campaign)
-                                continue
-                            request = ScrapeRequest(niche=plan.niche, city=local_plan.city, state=local_plan.state,
-                                min_google_maps_rank=plan.min_google_maps_rank, max_google_maps_rank=plan.max_google_maps_rank)
-                            if not qualify(base, request):
-                                progress["excluded"] += 1
-                                self._diagnose(campaign, "company_rank_excluded", **context,
-                                    reason=base.filter_reason, observed_rank=base.google_maps_rank)
-                                self._save(identity, campaign)
-                                continue
-                        assessment = {"summary": "Website research was not requested.", "fit": "unknown", "reasons": [], "unknowns": [], "evidence": [], "excluded": False}
-                        if plan.research_websites:
-                            self._save(identity, campaign, "researching", f"Checking SEO fit for {business.business_name or domain}.")
-                            try:
-                                assessment = research.assess(business, local_plan, profile)
-                            except HTTPException as error:
-                                assessment.update(summary="Website research could not be completed.", unknowns=["Research unavailable; manual review required"])
-                                self._diagnose(campaign, "company_research_error", **context,
-                                    status_code=error.status_code, calls_used=research.calls,
-                                    budget_exhausted=research.calls >= self.settings.research_max_calls)
-                            if (plan.qualification_criteria or plan.exclusions) and assessment["fit"] == "unknown":
-                                progress["review"] += 1
-                                self._diagnose(campaign, "company_research_unknown", **context)
-                                warning = "Businesses without enough evidence for your requested criteria were not counted. Review or simplify the criteria if the target falls short."
-                                if warning not in campaign["warnings"]:
-                                    campaign["warnings"].append(warning)
-                                self._save(identity, campaign)
-                                continue
-                            if assessment["excluded"] or assessment["fit"] == "poor":
-                                progress["excluded"] += 1
-                                self._diagnose(campaign, "company_research_excluded", **context, fit=assessment["fit"])
-                                self._save(identity, campaign)
-                                continue
-                        if cancel.is_set():
-                            raise InterruptedError
-                        self._save(identity, campaign, "enriching", f"Finding and checking people at {business.business_name or domain}. {progress['verified']}/{plan.max_leads} leads found.")
-                        search = hunter.search(domain)
-                        if cancel.is_set():
-                            raise InterruptedError
-                        if search.reason and search.reason.endswith(("quota_exhausted", "authentication_error", "rate_limit_cooldown")):
-                            campaign["stop_reason"] = search.reason
-                            raise RuntimeError("Contact provider requires attention")
-                        search_error = search.reason and search.reason not in {"hunter_search_limit_reached", "hunter_privacy_suppressed"}
-                        consecutive_hunter_errors = consecutive_hunter_errors + 1 if search_error else 0
-                        if consecutive_hunter_errors >= 3:
-                            campaign["stop_reason"] = "contact_provider_unavailable"
-                            raise RuntimeError("Contact provider repeatedly failed")
-                        candidates = [(person, kind) for person, kind in rank_candidates(search.contacts) if kind == "decision_maker" and is_person(person)]
-                        provider_domain = search.metadata.get("domain")
-                        website_basis = "user_supplied_company_website" if plan.source == "company_websites" else official_domain_basis(
-                            business, domain, search.metadata.get("organization"))
-                        if provider_domain and extract_domain(provider_domain)[1] != domain:
-                            website_basis = None
-                        if not website_basis:
-                            progress["review"] += 1
-                            self._diagnose(campaign, "company_identity_unconfirmed", **context, reason="official_company_domain_not_established")
-                            warning = "Companies whose website identity could not be established were held for review and did not count toward the target."
-                            if warning not in campaign["warnings"]:
-                                campaign["warnings"].append(warning)
-                            self._save(identity, campaign)
-                            continue
-                        affiliated = []
-                        for person, kind in candidates:
-                            if contact_matches_domain(person, domain):
-                                affiliated.append((person, kind))
-                            else:
-                                self._diagnose(campaign, "candidate_domain_mismatch", **context, reason="contact_email_outside_company_domain")
-                        candidates = affiliated
-                        base.company_validation = {"version": 1, "website_basis": website_basis,
-                            "company_domain": domain, "niche_basis": "maps_categories" if plan.source == "google_maps" else "supplied_or_researched_company",
-                            "contact_affiliation": "email_matches_company_domain", "branch_affiliation": "not_established"}
-                        self._diagnose(campaign, "company_contacts", **context,
-                            returned_contacts=len(search.contacts), eligible_candidates=len(candidates),
-                            generic_contacts=sum(is_generic(person) for person in search.contacts),
-                            non_generic_without_role=sum(not is_generic(person) and decision_tier(person) is None for person in search.contacts),
-                            ranked_people_without_name=sum(kind == "decision_maker" and not is_person(person) for person, kind in rank_candidates(search.contacts)),
-                            hunter_reason=search.reason)
-                        if search.reason and search.reason != "hunter_search_limit_reached":
-                            warning = "Some Hunter searches failed; lead yield may be incomplete. Check provider access before retrying."
-                            if warning not in campaign["warnings"]:
-                                campaign["warnings"].append(warning)
-                        if not candidates:
-                            progress["no_contact"] += 1
-                            self._diagnose(campaign, "company_no_eligible_contact", **context,
-                                reason=search.reason or ("no_returned_contacts" if not search.contacts else "contacts_failed_person_or_role_policy"))
-                        # Rejected/duplicate candidates do not consume a company slot.
-                        # Stop before spending on checks beyond the requested cap.
-                        saved_before = progress["verified"]
-                        checks = 0
-                        for candidate_index, (contact, kind) in enumerate(candidates, start=1):
-                            if cancel.is_set():
-                                raise InterruptedError
-                            if progress["verified"] >= plan.max_leads or lead_index.at_company_limit(domain, plan.max_leads_per_company):
-                                break
-                            email = contact.email.strip().casefold()
-                            if email in seen_emails:
-                                progress["reused"] += 1
-                                self._diagnose(campaign, "candidate_duplicate_email", **context, candidate_index=candidate_index)
-                                continue
-                            seen_emails.add(email)
-                            verification = cache.verify(contact.email)
-                            checks += 1
-                            self._diagnose(campaign, "candidate_verification", **context,
-                                candidate_index=candidate_index, result=verification.result,
-                                failure_reason=verification.failure_reason)
-                            if cancel.is_set() and verification.result == "verification_error":
-                                raise InterruptedError
-                            consecutive_check_errors = consecutive_check_errors + 1 if verification.result == "verification_error" else 0
-                            failure = verification.failure_reason or ""
-                            if failure.endswith(("quota_exhausted", "authentication_error", "rate_limit_cooldown")) or consecutive_check_errors >= 3:
-                                progress["verification_errors"] += 1
-                                campaign["stop_reason"] = failure if failure.endswith(("quota_exhausted", "authentication_error", "rate_limit_cooldown")) else "email_provider_unavailable"
-                                raise RuntimeError("Email provider requires attention")
-                            accepted_results = {"valid"} if plan.email_policy == "valid_only" else ACCEPTED_RESULTS
-                            if verification.result not in accepted_results:
-                                progress["rejected"] += 1
-                                progress["verification_errors"] += int(verification.result == "verification_error")
-                                continue
-                            lead = base.model_copy(deep=True)
-                            lead.contact, lead.contact_type, lead.verification = contact, kind, verification
-                            lead.verified, lead.enrichment_status = True, "verified"
-                            lead.hunter_search_reason, lead.hunter_metadata = search.reason, search.metadata
-                            lead.contact_scope = "email matches company domain with identity evidence; local branch affiliation not established"
-                            lead.enrichment_timestamp = datetime.fromisoformat(now())
-                            lead.verification_attempts = [{"email": contact.email, "contact_type": kind, **verification.model_dump()}]
-                            record_id = hashlib.sha256(email.encode()).hexdigest()[:32]
-                            record = {"id": record_id, "company": business.business_name or domain,
-                                "domain": domain, "industry": business.business_category or plan.niche,
-                                "location": business.business_address or ", ".join(filter(None, [business.business_city or local_plan.city, business.business_state or local_plan.state])),
-                                "website": business.business_website, "category": "verified", "stage": "new", "tags": [], "notes": "",
-                                "next_action": "", "follow_up": "", "campaign_ids": [campaign["id"]], "source": plan.source,
-                                "assessment": assessment, "lead": lead.model_dump(mode="json"), "created_at": now(),
-                                "activities": [{"at": now(), "message": "Found by " + plan.name}]}
+                        lead = base.model_copy(deep=True)
+                        lead.contact, lead.contact_type = contact, "decision_maker" if decision_tier(contact) else "person"
+                        lead.verification, lead.verified, lead.enrichment_status = verification, True, "verified"
+                        lead.enrichment_timestamp = datetime.fromisoformat(now())
+                        lead.hunter_metadata, lead.hunter_search_reason = search.metadata, search.reason
+                        lead.contact_scope = "Email matches company domain; local branch affiliation not established."
+                        lead.verification_attempts = [{"email": email, **verification.model_dump()}]
+                        business = lead.business
+                        record = {"id": hashlib.sha256(email.encode()).hexdigest()[:32],
+                            "company": business.business_name or domain, "domain": domain,
+                            "industry": business.business_category or plan.niche,
+                            "location": business.business_address or f"{business.business_city}, {business.business_state}",
+                            "website": business.business_website, "category": "verified", "stage": "new",
+                            "tags": [], "notes": "", "next_action": "", "follow_up": "",
+                            "campaign_ids": [campaign["id"]], "source": "google_maps",
+                            "assessment": {"summary": "", "fit": "unknown", "reasons": [], "unknowns": [], "evidence": [], "excluded": False},
+                            "lead": lead.model_dump(mode="json"), "created_at": now(),
+                            "activities": [{"at": now(), "message": "Found by " + plan.niche}]}
+                        self._diagnose(campaign, "lead_save_started", domain=domain, message=f"Contact {candidate_index}: accepted ({verification.result}); saving to the database.", contact_number=candidate_index)
+                        self._save(identity, campaign)
+                        # Keep recovery creation in the same owner lock as insertion,
+                        # so deletion cannot be followed by a stale recovery write.
+                        with self.store.operation_lock(identity.owner):
                             try:
                                 inserted = self.store.insert_lead(identity, record)
                             except HTTPException:
+                                self._diagnose(campaign, "lead_save_failed", domain=domain, level="error", message=f"Contact {candidate_index}: database save failed; attempting a local recovery copy.", contact_number=candidate_index)
                                 self.store.recovery_save(identity, "lead", record)
                                 raise
-                            lead_index.add(email, domain)
-                            if not inserted:
-                                progress["reused"] += 1
-                                self._diagnose(campaign, "candidate_insert_conflict", **context, candidate_index=candidate_index)
-                                continue
+                        if inserted:
                             progress["verified"] += 1
-                            local["leads"] += 1
-                            campaign["lead_ids"].append(record_id)
-                            self._diagnose(campaign, "lead_saved", **context, candidate_index=candidate_index)
-                            self._save(identity, campaign)
-                        self._diagnose(campaign, "company_enrichment_finished", **context,
-                            candidates=len(candidates), email_checks=checks,
-                            saved_leads=progress["verified"] - saved_before,
-                            company_limit_reached=lead_index.at_company_limit(domain, plan.max_leads_per_company),
-                            target_reached=progress["verified"] >= plan.max_leads)
+                            campaign["lead_ids"].append(record["id"])
+                            self._diagnose(campaign, "lead_saved", domain=domain, level="success", message=f"Contact {candidate_index}: lead saved. {progress['verified']} new leads saved so far.", contact_number=candidate_index, lead_id=record["id"])
+                        else:
+                            progress["reused"] += 1
+                            self._diagnose(campaign, "lead_insert_conflict", domain=domain, message=f"Contact {candidate_index}: already exists in the database; duplicate insert skipped.", contact_number=candidate_index)
                         self._save(identity, campaign)
-                    local["status"] = "target_reached" if progress["verified"] >= plan.max_leads else "completed"
+                    progress["processed"] += 1
+                    delta = {key: progress[key] - before[key] for key in before}
+                    self._diagnose(campaign, "domain_finished", domain=domain,
+                        message=f"Domain finished: {delta['checked']} checked, {delta['verified']} saved, {delta['rejected']} rejected, {delta['reused']} duplicates skipped.", **delta)
                     self._save(identity, campaign)
-            if cancel.is_set():
-                raise InterruptedError
-            shortfall = max(0, plan.max_leads - progress["verified"])
-            campaign["shortfall"] = shortfall
-            if shortfall:
-                city_count = len({(item["city"], item["state"]) for item in campaign["locations"]})
-                message = f"Found {progress['verified']} of {plan.max_leads} requested leads across {city_count} locations ({len(campaign['locations'])} search passes). {shortfall} more leads are needed."
-                if progress["verification_errors"]:
-                    campaign["warnings"].append(f"{progress['verification_errors']} email checks failed; these are not counted as unknown or as leads.")
-                if plan.source != "company_websites" and self.settings.openai_key:
-                    self._save(identity, campaign, "recommending", message + " Researching similar cities for your SEO outreach.")
-                    # Reserve a separate two-call budget so company research cannot consume recommendations.
-                    recommendations_research = ResearchService(replace(self.settings, research_max_calls=2))
-                    try:
-                        campaign["recommendations"] = recommendations_research.recommend_locations(plan, profile)
-                    except (HTTPException, ValueError):
-                        campaign["warnings"].append("Similar-city research was unavailable. Ask the advisor to recommend the next locations.")
-                if cancel.is_set():
-                    raise InterruptedError
-                message += " Review the suggested cities to continue." if campaign["recommendations"] else " Tell me more cities, or ask me to research similar markets, to continue."
-                if campaign.get("stop_reason"):
-                    message += " Stop reason: " + campaign["stop_reason"].replace("_", " ") + "."
-                if campaign["warnings"]:
-                    message += " Some research or provider checks were limited; see the run details."
-                status = "shortfall"
-            else:
-                policy = "valid" if plan.email_policy == "valid_only" else "valid, catchall or unknown"
-                message = f"Found all {plan.max_leads} requested leads. Each is a unique person with a Hunter email checked by NeverBounce as {policy}."
-                if plan.max_leads_per_company is not None:
-                    message += f" At most {plan.max_leads_per_company} saved lead(s) per company domain, including existing leads."
-                campaign["stop_reason"] = "target_reached"
-                status = "completed"
-            campaign["completed_at"] = now()
-            self._save(identity, campaign, status, message)
+            self._check_cancel(cancel)
+            campaign.update(completed_at=now(), stop_reason="all_domains_processed")
+            self._save(identity, campaign, "completed",
+                f"Finished all {len(plan.locations)} cities and {len(domains)} unique domains. Saved {progress['verified']} new leads.")
         except InterruptedError:
-            campaign["stop_reason"] = "cancelled"
-            campaign["completed_at"] = now()
-            self._safe_finish(identity, campaign, "cancelled", f"Search stopped with {progress['verified']} of {plan.max_leads} leads saved. An existing source actor may still finish.")
+            campaign.update(status="cancelled", stop_reason="cancelled", completed_at=now(),
+                message=f"Search stopped. {progress['verified']} saved leads retained.")
         except Exception as error:
-            self._diagnose(campaign, "campaign_error", exception_type=type(error).__name__,
-                stop_reason=campaign.get("stop_reason", "provider_or_storage_failure"))
             campaign.setdefault("stop_reason", "provider_or_storage_failure")
-            campaign["completed_at"] = now()
-            self._safe_finish(identity, campaign, "failed", f"Search interrupted with {progress['verified']} of {plan.max_leads} leads saved. A provider or storage request failed; the remaining cities may not have been searched. Check provider accounts before retrying.")
+            self._diagnose(campaign, "campaign_error", level="error", message="Search interrupted: " + campaign["stop_reason"].replace("_", " ") + ".", exception_type=type(error).__name__)
+            campaign.update(status="failed", completed_at=now(),
+                message=f"Search interrupted. {progress['verified']} saved leads retained. Check provider access and storage before starting another search.")
         finally:
-            campaign["shortfall"] = max(0, plan.max_leads - progress["verified"])
-            services = [research] + ([recommendations_research] if recommendations_research else [])
-            campaign["usage"] = {"requests": sum(s.calls for s in services), "input_tokens": sum(s.input_tokens for s in services), "output_tokens": sum(s.output_tokens for s in services)}
-            self._diagnose(campaign, "campaign_finished", status=campaign["status"], stop_reason=campaign.get("stop_reason"),
-                progress=dict(progress), diagnostic_counts=dict(campaign.get("diagnostics", {}).get("counts", {})))
+            self._diagnose(campaign, "campaign_finished", level="success" if campaign["status"] == "completed" else "warning",
+                message=f"Search {campaign['status']}: {progress['processed']} domains processed, {progress['checked']} emails checked, {progress['verified']} leads saved.", status=campaign["status"])
             try:
                 self.store.save(identity, "campaign", campaign)
             except Exception:
                 self.store.recovery_save(identity, "campaign", campaign)
-            with self.lock:
-                self.jobs.pop(campaign["id"], None)
-
-    def _locations(self, campaign, plan, locations, cancel):
-        """Deepen only saturated city searches; never add geography or loop forever."""
-        queue = [(location, 1) for location in locations]
-        index = 0
-        while index < len(queue):
-            if cancel.is_set():
-                raise InterruptedError
-            if campaign["progress"]["verified"] >= plan.max_leads:
-                return
-            location, round_number = queue[index]
-            index += 1
-            yield location, round_number
-            local = campaign["locations"][-1]
-            if (plan.source == "google_maps" and local["source_count"] >= local["business_limit"]
-                    and local["new_domains"] > 0):
-                if round_number < plan.max_city_rounds:
-                    queue.append((location, round_number + 1))
-                else:
-                    campaign["stop_reason"] = "city_depth_budget_reached"
-        campaign.setdefault("stop_reason", "approved_locations_exhausted")
-
-    def _safe_finish(self, identity, campaign, status, message):
-        try:
-            self._save(identity, campaign, status, message)
-        except Exception:
-            self.store.recovery_save(identity, "campaign", campaign)
+            finally:
+                with self.lock:
+                    self.jobs.pop(campaign["id"], None)
 
     def close(self):
         with self.lock:

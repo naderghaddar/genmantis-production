@@ -154,6 +154,30 @@ class WorkspaceStore:
                 (identity.owner, kind, value["id"], json.dumps(value)))
         return value
 
+    def delete_leads(self, identity, record_ids):
+        """Delete only this owner's requested leads, including pending recovery writes."""
+        ids = list(dict.fromkeys(record_ids))
+        if not ids:
+            return {"deleted": 0, "deleted_ids": []}
+        with self.operation_lock(identity.owner):
+            deleted = set()
+            if identity.token:
+                # IDs are validated by the API; quote them as PostgREST literals too.
+                rows = self._remote(identity, "DELETE", {"owner_id": "eq." + identity.owner,
+                    "kind": "eq.lead", "record_id": "in.(" + ",".join(json.dumps(item) for item in ids) + ")",
+                    "select": "record_id"})
+                deleted.update(row["record_id"] for row in rows)
+            placeholders = ",".join("?" for _ in ids)
+            params = (identity.owner, *ids)
+            with self.lock, self.db:
+                for table in ("workspace_records", "workspace_outbox"):
+                    local = self.db.execute(
+                        f"SELECT id FROM {table} WHERE owner=? AND kind='lead' AND id IN ({placeholders})", params).fetchall()
+                    deleted.update(row[0] for row in local)
+                    self.db.execute(
+                        f"DELETE FROM {table} WHERE owner=? AND kind='lead' AND id IN ({placeholders})", params)
+            return {"deleted": len(deleted), "deleted_ids": [item for item in ids if item in deleted]}
+
     def recovery_save(self, identity, kind, value):
         """Preserve provider results locally if cloud storage fails mid-job."""
         value["updated_at"] = now()

@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Search,
   SlidersHorizontal,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import {
   type Stage,
 } from "../../services/workspaceApi";
 import { Badge, Empty } from "./Shared";
+import DeleteLeadsDialog from "./DeleteLeadsDialog";
 
 export default function Leads({
   workspace,
@@ -50,6 +52,7 @@ export default function Leads({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [filters, setFilters] = useState(!!initialCampaign);
+  const [deleting, setDeleting] = useState<CRMLead[] | null>(null);
   const industries = [
     ...new Set(workspace.leads.map((lead) => lead.industry)),
   ].sort();
@@ -80,14 +83,7 @@ export default function Leads({
         .sort((a, b) =>
           sort === "name"
             ? a.company.localeCompare(b.company)
-            : sort === "fit"
-              ? { strong: 0, possible: 1, unknown: 2, poor: 3 }[
-                  a.assessment.fit
-                ] -
-                { strong: 0, possible: 1, unknown: 2, poor: 3 }[
-                  b.assessment.fit
-                ]
-              : b.created_at.localeCompare(a.created_at),
+            : b.created_at.localeCompare(a.created_at),
         ),
     [workspace.leads, category, query, industry, stage, campaign, sort],
   );
@@ -207,7 +203,6 @@ export default function Leads({
           >
             <option value="recent">Recently added</option>
             <option value="name">Company A–Z</option>
-            <option value="fit">Best fit first</option>
           </select>
         </div>
         {filters && (
@@ -291,6 +286,10 @@ export default function Leads({
             <button className="text-link" onClick={() => setSelected([])}>
               Clear
             </button>
+            <button className="btn-danger small" disabled={busy || !workspace.leads.some((lead) => selected.includes(lead.id))}
+              onClick={() => setDeleting(workspace.leads.filter((lead) => selected.includes(lead.id)))}>
+              <Trash2 size={15} /> Delete selected
+            </button>
           </div>
         )}
         {error && (
@@ -332,7 +331,7 @@ export default function Leads({
                     <th>Person</th>
                     <th>Email</th>
                     <th>Verification</th>
-                    <th>Fit</th>
+                    <th>Maps rank</th>
                     <th>Stage</th>
                     <th>Added</th>
                     <th />
@@ -378,7 +377,7 @@ export default function Leads({
                                   lead.lead.contact.last_name,
                                 ]
                                   .filter(Boolean)
-                                  .join(" ") || "Company inbox"
+                                  .join(" ") || "Name unavailable"
                               : "No contact found"}
                           </span>
                           <small>
@@ -401,14 +400,7 @@ export default function Leads({
                         </Badge>
                       </td>
                       <td>
-                        <span
-                          className={"fit-indicator fit-" + lead.assessment.fit}
-                        >
-                          <i />
-                          {lead.assessment.fit === "unknown"
-                            ? "Unassessed"
-                            : lead.assessment.fit}
-                        </span>
+{lead.lead.google_maps_rank ?? "Unavailable"}
                       </td>
                       <td>
                         <span className={"stage-label stage-" + lead.stage}>
@@ -419,6 +411,7 @@ export default function Leads({
                         {dateLabel(lead.created_at)}
                       </td>
                       <td>
+                        <div className="lead-row-actions">
                         <button
                           aria-label={"Open " + lead.company}
                           className="icon-button"
@@ -426,6 +419,11 @@ export default function Leads({
                         >
                           <ArrowUpRight size={16} />
                         </button>
+                        <button className="icon-button delete-lead-button" aria-label={`Delete ${lead.lead.contact?.email || lead.company}`}
+                          title="Delete lead" disabled={busy} onClick={() => setDeleting([lead])}>
+                          <Trash2 size={15} />
+                        </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -472,7 +470,7 @@ export default function Leads({
             text={
               workspace.leads.length
                 ? "Try another search or clear your filters."
-                : "Ask your GenMantis agent for a niche, cities and lead count. Named people with accepted email checks appear here automatically."
+                : "Enter a niche and cities, or import a city CSV. People with accepted email checks appear here automatically."
             }
             action={
               <button
@@ -498,6 +496,11 @@ export default function Leads({
           />
         )}
       </div>
+      {deleting && <DeleteLeadsDialog leads={deleting} onClose={() => setDeleting(null)} onDeleted={async (ids) => {
+        await refresh();
+        setSelected((current) => current.filter((id) => !ids.includes(id)));
+        setDeleting(null);
+      }} />}
     </div>
   );
 }

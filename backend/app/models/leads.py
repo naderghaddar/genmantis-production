@@ -55,7 +55,7 @@ class CheckedContact(BaseModel):
 class Lead(BaseModel):
     business: Business
     contact: Contact | None = None
-    contact_type: Literal["decision_maker", "generic"] | None = None
+    contact_type: Literal["decision_maker", "person", "generic"] | None = None
     verification: Verification | None = None
     verified: bool = False
     enrichment_status: str = "pending"

@@ -11,10 +11,12 @@ TITLES = [
 
 
 def is_generic(contact: Contact) -> bool:
-    return contact.provider_type == "generic" or (
-        contact.email.split("@", 1)[0].lower() in GENERIC_PREFIXES and
-        not contact.first_name and not contact.last_name
-    )
+    provider_type = (contact.provider_type or "").strip().casefold()
+    if provider_type in {"generic", "personal"}:
+        return provider_type == "generic"
+    # Fall back to known shared inboxes only when Hunter has not classified it.
+    # Names never affect whether an address is generic.
+    return contact.email.strip().split("@", 1)[0].casefold() in GENERIC_PREFIXES
 
 
 def decision_tier(contact: Contact) -> int | None:

@@ -1,75 +1,28 @@
-# Investigating company-to-lead yield
+# Sequential search diagnostics
 
-New campaign runs emit INFO logs on `uvicorn.error.lead_funnel`. Each message
-starts with `lead_funnel` followed by a JSON object. Normal Uvicorn INFO logging
-includes these events; no debug flag or provider calls are needed to enable them.
-Restart the backend with the updated code before starting a new campaign.
+Each new search card includes a **Flow debug log**, refreshed by the existing four-second workspace poll. Filter by domain, event, result, or details; optionally show warnings/errors only. Download the retained log as JSON for inspection. The latest 500 entries are retained per campaign, with a total event count so truncation is visible. Historical campaigns cannot be backfilled.
 
-For Docker Compose, capture the next run with:
+The log follows city scraping, website/rank filtering, duplicate domains, Hunter request and selection counts (including separate generic, malformed-email and wrong-domain exclusions, plus the number selected without names), existing email skips, NeverBounce start/results, database saves/conflicts/failures, and a per-domain summary. It identifies contacts as Contact 1/2 within their domain without recording their names, emails, credentials, or raw provider responses. Request-start events are saved before waiting on Hunter/NeverBounce, so a slow request is visible in the UI.
 
-```powershell
-docker compose logs --follow --since 5m genmantis 2>&1 | Select-String 'lead_funnel' | Tee-Object -FilePath lead-funnel.log
-```
+The current workflow is implemented by `CampaignService` and identified by `workflow: sequential-v1` on saved campaign records. It completes all Apify city runs before processing unique domains with Hunter and NeverBounce. There are no research or recommendation calls.
 
-For a locally launched backend, the same events appear in its console. Filter by
-`campaign_id` to isolate a run, then by `domain` to follow one company. Hunter's
-page and filter events share the campaign ID and domain. `company_index` identifies
-a company's processing attempt; city and round identify the discovery pass.
-Logs omit contact names, email addresses, credentials, raw provider responses,
-and exception messages. Company domains and campaign IDs are included.
+`GET /api/workspace` exposes each campaign's status, message, city results, warnings and progress:
 
-| Event | What to inspect |
-| --- | --- |
-| `campaign_started` | Actual policies, existing-email count, provider pagination limits and research budget |
-| `apify_request` | Exact actor JSON, including cap, geography and category filters |
-| `company_niche_excluded` / `company_location_excluded` | Category evidence or listed city failed targeting |
-| `company_identity_unconfirmed` | Company name/domain/provider organization could not establish website identity |
-| `candidate_domain_mismatch` | Contact email is outside the company domain |
-| `apify_abort_requested` / `apify_abort_failed` | Cancellation requested an actor abort or the abort call failed |
-| `discovery_batch` | Source records versus unique places versus unique companies |
-| `company_no_domain` | `no_website`, `invalid_website`, or `excluded_domain` |
-| `company_repeated_domain` | Company was already encountered in this campaign |
-| `company_at_saved_limit` | Existing saved contacts consumed the company cap |
-| `company_rank_excluded` | Missing organic evidence versus observed rank outside the requested range |
-| `company_research_error` | HTTP status, calls used and whether the research budget was exhausted |
-| `company_research_unknown` / `company_research_excluded` | Evidence or fit prevented enrichment |
-| `hunter_page_result` | Returned records, parsed contacts, provider total, and truncation |
-| `hunter_page_error` | Safe provider error code |
-| `hunter_filter_result` | Filter, ranked versus eligible contacts, stop/broaden decision, filters left untried |
-| `company_contacts` | Generic contacts, contacts without qualifying roles, ranked people without names |
-| `company_no_eligible_contact` | Empty Hunter response versus contacts failing the person/role policy |
-| `candidate_duplicate_email` | Candidate already exists or was encountered earlier |
-| `candidate_verification` | Exact NeverBounce outcome and safe failure code |
-| `candidate_insert_conflict` | Storage found an already-saved contact |
-| `lead_saved` | Accepted new lead |
-| `company_enrichment_finished` | Candidate count, checks, saved leads and whether target/company cap was reached |
-| `campaign_error` / `campaign_finished` | Exception class, final status, stop reason, progress and event counts |
+- `cities_completed` / `cities_total`: completed Apify city runs.
+- `scraped`: source business records collected, before domain/rank filtering.
+- `discovered`: unique eligible domains after all cities finish.
+- `duplicates`: repeated eligible company domains removed from the current search.
+- `processed`: domains whose enrichment step finished.
+- `checked`: NeverBounce checks performed, at most two selected emails per domain.
+- `verified`: new accepted contacts saved, including valid, catchall and unknown results.
+- `reused`: existing emails skipped, or insertion conflicts.
+- `excluded`: source results excluded by rank requirements.
+- `no_contact`: source results without a usable domain plus domains without an eligible non-generic email. This mixes units and is not a single conversion funnel.
+- `rejected`: email checks whose outcome was not accepted.
+- `verification_errors`: checks that failed; these are never counted as NeverBounce unknown results.
 
-An especially useful signal is `hunter_filter_result` with
-`decision=stop_ranked_contacts`, `eligible_people=0`, and `remaining_filters>0`:
-discovery stopped even though the campaign cannot use any returned contact.
-If eligible candidates exist but no lead is saved, inspect duplicate, verification,
-and storage events for that domain.
+The `uvicorn.error.lead_funnel` logger emits `lead_funnel` JSON records. Current events include `apify_request` (actor JSON), `hunter_page_result`, `hunter_page_error`, `candidate_verification`, and `campaign_error`. Campaign records retain event totals in `diagnostics.counts` (version 2). Provider diagnostics omit credentials and contact email addresses.
 
-Campaign records also retain `diagnostics.version`, `diagnostics.counts` (event
-totals), and `diagnostics.reasons` (reason totals by event). They are available in
-the existing `GET /api/workspace` response under each campaign. Detailed domain
-events live in server logs; they are not added to the frontend. Older campaigns
-cannot be reconstructed from this instrumentation.
+Completion means all city and domain work finished, not that a requested lead target was reached. Inspect warnings and error counters for individual provider failures. Consecutive provider errors or account/quota failures stop the search. Cancellation and failures retain already-saved contacts. A backend restart marks an active search interrupted; it is not automatically resumed.
 
-These counters have different units: discovery records, company processing
-attempts, Hunter filter/page requests, contact candidates, and saved leads.
-Do not sum them together as a single funnel. Repeated city passes can make
-processing attempts exceed distinct discovered companies. Cancellation or a
-provider/storage failure can interrupt a company before its finished event.
-
-The diagnostic tests use simulated HTTP responses through the actual Hunter
-parser and fallback implementation. A 300-company comparison produces 12 versus
-240 leads by changing how many owner records contain a person's name. This
-demonstrates a possible low-yield mechanism and the effect of fixture completeness;
-it does not establish the cause or expected yield of a live run.
-
-```powershell
-cd backend
-.\.venv\Scripts\python.exe -m pytest tests/test_lead_diagnostics.py -q
-```
+Old campaign diagnostics used different events and counters. Their historical data remains stored; it cannot be interpreted as the current sequential workflow.

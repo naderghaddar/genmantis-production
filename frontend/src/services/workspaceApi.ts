@@ -27,6 +27,12 @@ export interface Config {
 export type Stage =
   "new" | "qualified" | "contacted" | "meeting" | "won" | "lost" | "archived";
 export type Category = "verified" | "needs_review" | "no_contact" | "excluded";
+export interface CityInput {
+  city: string;
+  state: string;
+  min_rank?: number | null;
+  max_rank?: number | null;
+}
 export interface Plan {
   name: string;
   source: "google_maps" | "web_research" | "company_websites";
@@ -34,7 +40,8 @@ export interface Plan {
   city: string;
   state: string;
   query: string;
-  locations?: { city: string; state: string }[];
+  locations?: CityInput[];
+  places_per_city?: number;
   websites: string[];
   max_leads: number;
   max_leads_per_company?: number | null;
@@ -48,6 +55,16 @@ export interface Plan {
   max_google_maps_rank: number | null;
 }
 export interface Campaign {
+  debug_log?: {
+    id: number;
+    at: string;
+    event: string;
+    level: "info" | "warning" | "error" | "success";
+    message: string;
+    domain?: string | null;
+    details: Record<string, unknown>;
+  }[];
+  workflow?: string;
   id: string;
   plan: Plan;
   version: number;
@@ -62,7 +79,7 @@ export interface Campaign {
   shortfall?: number;
   policy_version?: string;
   stop_reason?: string;
-  diagnostics?: { version: number; counts: Record<string, number>; reasons?: Record<string, Record<string, number>> };
+  diagnostics?: { version: number; counts: Record<string, number>; sequence?: number; reasons?: Record<string, Record<string, number>> };
   locations?: {
     city: string;
     state: string;
@@ -80,6 +97,11 @@ export interface Campaign {
     evidence: Evidence[];
   }[];
   progress: {
+    scraped?: number;
+    duplicates?: number;
+    checked?: number;
+    cities_completed?: number;
+    cities_total?: number;
     discovered: number;
     processed: number;
     verified: number;

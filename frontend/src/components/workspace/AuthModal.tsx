@@ -44,8 +44,8 @@ export function AuthModal({
       <form className="auth-form" onSubmit={submit}>
         <p className="muted">
           {required
-            ? "Sign in to access your research workspace."
-            : "Sign in to keep your leads, campaigns and research in your cloud workspace. Local records stay in your separate local workspace."}
+            ? "Sign in to access your lead workspace."
+            : "Sign in to keep your leads and searches in your cloud workspace. Local records stay in your separate local workspace."}
         </p>
         <label>
           Email

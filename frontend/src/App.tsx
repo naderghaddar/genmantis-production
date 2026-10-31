@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LogOut, Menu, Sparkles, Users } from "lucide-react";
+import { LogOut, Menu, Search, Users } from "lucide-react";
 import {
   active,
   api,
@@ -9,15 +9,15 @@ import {
   type Workspace,
 } from "./services/workspaceApi";
 import { Mark, Spinner } from "./components/workspace/Shared";
-import Advisor from "./components/workspace/Advisor";
+import FindLeads from "./components/workspace/FindLeads";
 import Leads from "./components/workspace/Leads";
 import LeadDetail from "./components/workspace/LeadDetail";
 import { AuthModal } from "./components/workspace/AuthModal";
 
-type Page = "advisor" | "leads";
+type Page = "search" | "leads";
 export default function App() {
   const [page, setPage] = useState<Page>(() =>
-    window.location.hash === "#leads" ? "leads" : "advisor",
+    window.location.hash === "#leads" ? "leads" : "search",
   );
   const [config, setConfig] = useState<Config | null>(null);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -62,7 +62,7 @@ export default function App() {
               generation.current += 1;
               setWorkspace(null);
               setLeadId(null);
-              setPage("advisor");
+              setPage("search");
               setLeadSearch("");
               setAuthRequired(
                 event === "SIGNED_OUT" && !cfg.auth.local_enabled,
@@ -105,7 +105,7 @@ export default function App() {
   }, [page]);
   useEffect(() => {
     const change = () =>
-      setPage(window.location.hash === "#leads" ? "leads" : "advisor");
+      setPage(window.location.hash === "#leads" ? "leads" : "search");
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
@@ -121,23 +121,23 @@ export default function App() {
       )}
       <aside className={"sidebar " + (sidebar ? "open" : "")}>
         <a
-          href="#advisor"
+          href="#search"
           className="brand-lockup"
-          onClick={() => setPage("advisor")}
+          onClick={() => setPage("search")}
         >
           <Mark />
           <span>
             genmantis<span className="brand-period">.</span>
           </span>
         </a>
-        <p className="focused-tagline">Your SEO growth partner</p>
+        <p className="focused-tagline">Simple lead discovery</p>
         <nav aria-label="Main navigation">
           <button
-            className={"nav-item " + (page === "advisor" ? "active" : "")}
-            onClick={() => setPage("advisor")}
+            className={"nav-item " + (page === "search" ? "active" : "")}
+            onClick={() => setPage("search")}
           >
-            <Sparkles size={18} />
-            <span>Research advisor</span>
+            <Search size={18} />
+            <span>Find leads</span>
           </button>
           <button
             className={"nav-item " + (page === "leads" ? "active" : "")}
@@ -152,12 +152,11 @@ export default function App() {
           </button>
         </nav>
         <div className="sidebar-bottom">
-          <div className="advisor-tip">
-            <Sparkles size={21} />
-            <strong>Tell your agent who to find.</strong>
+          <div className="search-tip">
+            <Search size={21} />
+            <strong>One city. One domain. One step at a time.</strong>
             <p>
-              Choose your niche, cities and number of leads. GenMantis handles
-              the research.
+              Add your niche and cities. Find people and check their emails.
             </p>
           </div>
           <div className="account-row">
@@ -199,7 +198,7 @@ export default function App() {
               <Menu size={20} />
             </button>
             <strong>
-              {page === "advisor" ? "Research advisor" : "Lead database"}
+              {page === "search" ? "Find leads" : "Lead database"}
             </strong>
           </div>
           <span className="system-status">
@@ -225,12 +224,12 @@ export default function App() {
         {loading ? (
           <div className="app-loading">
             <Mark />
-            <Spinner label="Opening your agent…" />
+            <Spinner label="Opening your workspace…" />
           </div>
         ) : workspace && config ? (
           <>
-            <div hidden={page !== "advisor"}>
-              <Advisor
+            <div hidden={page !== "search"}>
+              <FindLeads
                 key={workspace.account.email || "local"}
                 workspace={workspace}
                 refresh={refresh}
@@ -238,9 +237,6 @@ export default function App() {
                   setLeadSearch(campaign.id);
                   setPage("leads");
                 }}
-                researchAvailable={config.integrations.some(
-                  (item) => item.name === "OpenAI" && item.connected,
-                )}
               />
             </div>
             {page === "leads" && (
@@ -250,7 +246,7 @@ export default function App() {
                 workspace={workspace}
                 refresh={refresh}
                 openLead={(lead) => setLeadId(lead.id)}
-                onResearch={() => setPage("advisor")}
+                onResearch={() => setPage("search")}
               />
             )}
           </>
@@ -258,7 +254,7 @@ export default function App() {
           !error && (
             <div className="app-loading">
               <Mark />
-              <h2>Your GenMantis agent awaits</h2>
+              <h2>Sign in to your lead workspace</h2>
               <button className="btn-primary" onClick={() => setShowAuth(true)}>
                 Sign in to continue
               </button>

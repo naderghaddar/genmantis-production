@@ -1,4 +1,5 @@
-"""GenMantis lead policy: named people and the user's accepted NeverBounce outcomes."""
+"""Accept non-generic emails with the user's accepted NeverBounce outcomes; names are optional."""
+import re
 from app.models.leads import Contact
 from app.services.contact_selector import is_generic
 
@@ -6,9 +7,10 @@ ACCEPTED_RESULTS = frozenset({"valid", "catchall", "unknown"})
 
 
 def is_person(contact: Contact | None) -> bool:
-    if contact is None or not contact.email.strip() or is_generic(contact):
-        return False
-    return bool((contact.first_name or "").strip() or (contact.last_name or "").strip())
+    """Email eligibility, independent of whether Hunter supplies a person's name."""
+    return bool(contact is not None and
+        re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", contact.email.strip()) and
+        not is_generic(contact))
 
 
 def verified_contact(record: dict) -> bool:
