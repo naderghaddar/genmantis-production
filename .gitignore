@@ -9,3 +9,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 backend/.data/
+
+# Local diagnostic exports
+/search-*-debug.json
